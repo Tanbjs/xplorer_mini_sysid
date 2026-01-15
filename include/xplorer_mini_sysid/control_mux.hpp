@@ -5,7 +5,7 @@
 #include <std_srvs/srv/set_bool.hpp>
 #include <geometry_msgs/msg/wrench_stamped.hpp>
 
-#include "xplorer_mini_sysid/signal_gen_lib.hpp"
+#include "xplorer_mini_sysid/signal_generate_lib.hpp"
 
 class ControlMux : public rclcpp::Node 
 {
