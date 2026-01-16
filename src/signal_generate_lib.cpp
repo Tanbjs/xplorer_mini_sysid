@@ -4,17 +4,13 @@ namespace SysID
 {
     namespace SignalGenerator
     {
-        Eigen::MatrixXd UniformWhiteNoise(
-            const int &n_samples,
-            const int &n_signals,
-            const Eigen::VectorXd &amplitudes
-        ) 
+        Eigen::MatrixXd RBS(const int &n_samples, const int &n_signals, const RBSConfig &config) 
         {
             Eigen::MatrixXd signal = Eigen::MatrixXd::Zero(n_samples, n_signals);
             std::default_random_engine generator;
             for (int i = 0; i < n_signals; ++i) 
             {
-                std::uniform_real_distribution<double> distribution(-amplitudes(i), amplitudes(i));
+                std::uniform_real_distribution<double> distribution(config.min(i), config.max(i));
                 for (int k = 0; k < n_samples; ++k) 
                 {
                     signal(k, i) = distribution(generator);
@@ -22,58 +18,33 @@ namespace SysID
             }
             return signal;
         }
-        
-        Eigen::MatrixXd PRBS(
-            const int &n_samples,
-            const int &n_signals,
-            const int &min_switch_time,
-            const int &max_switch_time,
-            const Eigen::VectorXd &amplitudes
-        ) 
+
+        Eigen::MatrixXd RGS(const int &n_samples, const int &n_signals, const RGSConfig &config) 
         {
             Eigen::MatrixXd signal = Eigen::MatrixXd::Zero(n_samples, n_signals);
             std::default_random_engine generator;
-            std::uniform_int_distribution<int> distribution(min_switch_time, max_switch_time);
-            std::uniform_int_distribution<int> level_distribution(0, 1);
-
             for (int i = 0; i < n_signals; ++i) 
             {
-                int k = 0;
-                while (k < n_samples) 
-                {
-                    int switch_time = distribution(generator);
-                    int level = level_distribution(generator) ? 1 : -1;
-                    for (int j = 0; j < switch_time && k < n_samples; ++j, ++k) 
-                    {
-                        signal(k, i) = level * amplitudes(i);
-                    }
-                }
-            }
-            return signal;
-        }
-     
-        Eigen::MatrixXd Multisine(
-            const int &n_samples,
-            const int &n_signals,
-            const Eigen::VectorXd &f_max,
-            const Eigen::VectorXd &amplitudes
-        ) 
-        {
-            int n_signals = amplitudes.size();
-            Eigen::MatrixXd signal = Eigen::MatrixXd::Zero(n_samples, n_signals);
-            for (int i = 0; i < n_signals; ++i) 
-            {
+                std::normal_distribution<double> distribution(config.mean(i), config.stddev(i));
                 for (int k = 0; k < n_samples; ++k) 
                 {
-                        double time = static_cast<double>(k);
-                        signal(k, i) = 0.0;
-                        for (double f = 1.0; f <= f_max(i); f += 1.0) 
-                        {
-                            signal(k, i) += amplitudes(i) * sin(2.0 * M_PI * f * time / n_samples);
-                        }
+                    signal(k, i) = distribution(generator);
                 }
             }
             return signal;
         }
+
+        Eigen::MatrixXd Multisine(const int &n_samples, const int &n_signals, const MultisineConfig &config) 
+        {
+        }
+
+        Eigen::MatrixXd Chirp(const int &n_samples, const int &n_signals, const ChirpConfig &config) 
+        {
+        }
+
+        Eigen::MatrixXd PRBS(const int &n_samples, const int &n_signals, const PRBSConfig &config) 
+        {
+        }
+
     };
-}
+};
