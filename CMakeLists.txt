@@ -34,10 +34,18 @@ ament_target_dependencies(control_mux
 )
 
 # ========================== Install =========================
-install(TARGETS 
-  signal_generate_lib 
-  control_mux
+install(TARGETS signal_generate_lib
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+install(TARGETS control_mux
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY include/
+  DESTINATION include
 )
 
 install(
