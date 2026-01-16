@@ -26,6 +26,7 @@ ControlMux::ControlMux() : Node("control_mux")
 
 void ControlMux::init_params_() 
 {
+    // Initialize ROS parameters with default values
     dt_ = this->declare_parameter("dt", 0.1);
     control_mode_ = this->declare_parameter("control_mode", "closed");
     signal_type_ = SignalGenerator::stringToSignalType(this->declare_parameter("signal_type", "RBS"));
@@ -43,6 +44,29 @@ void ControlMux::init_params_()
     multisine_config_.grid_skips = this->declare_parameter("multisine_config.grid_skips", 0);
     multisine_config_.n_trails = this->declare_parameter("multisine_config.n_trails", 0);
     multisine_config_.n_sines = this->declare_parameter("multisine_config.n_sines", 0);
+
+    // Log initialized parameters
+    RCLCPP_INFO(this->get_logger(), "############## Initialized parameters ##############");
+    RCLCPP_INFO(this->get_logger(), "### General parameters ###");
+    RCLCPP_INFO(this->get_logger(), "- dt_: %f", dt_);
+    RCLCPP_INFO(this->get_logger(), "- control_mode_: %s", control_mode_.c_str());
+    RCLCPP_INFO(this->get_logger(), "- signal_type_: %s", this->get_parameter("signal_type").as_string().c_str());
+    RCLCPP_INFO(this->get_logger(), "### General signal parameters ###");
+    RCLCPP_INFO(this->get_logger(), "- duration_: %f", duration_);
+    RCLCPP_INFO(this->get_logger(), "- n_signals_: %d", n_signals_);
+    RCLCPP_INFO_STREAM(this->get_logger(), "- tau_offset_: " << tau_offset_.transpose());
+    RCLCPP_INFO(this->get_logger(), "### Random binary sequence generator parameters ###");
+    RCLCPP_INFO_STREAM(this->get_logger(), "- rbs_config_.min: " << rbs_config_.min.transpose());
+    RCLCPP_INFO_STREAM(this->get_logger(), "- rbs_config_.max: " << rbs_config_.max.transpose());
+    RCLCPP_INFO(this->get_logger(), "### Random Gaussian sequence generator parameters ###");
+    RCLCPP_INFO_STREAM(this->get_logger(), "- rgs_config_.mean: " << rgs_config_.mean.transpose());
+    RCLCPP_INFO_STREAM(this->get_logger(), "- rgs_config_.stddev: " << rgs_config_.stddev.transpose());
+    RCLCPP_INFO(this->get_logger(), "### Multisine signal generator parameters ###");
+    RCLCPP_INFO_STREAM(this->get_logger(), "- multisine_config_.amplitudes: " << multisine_config_.amplitudes.transpose());
+    RCLCPP_INFO(this->get_logger(), "- multisine_config_.grid_skips: %d", multisine_config_.grid_skips);
+    RCLCPP_INFO(this->get_logger(), "- multisine_config_.n_trails: %d", multisine_config_.n_trails);
+    RCLCPP_INFO(this->get_logger(), "- multisine_config_.n_sines: %d", multisine_config_.n_sines);
+    RCLCPP_INFO(this->get_logger(), "###################################################");
 }
 
 rcl_interfaces::msg::SetParametersResult ControlMux::update_params_(const std::vector<rclcpp::Parameter> &parameters) 
@@ -150,24 +174,31 @@ void ControlMux::signal_gen_trigger_srv_callback_(
     std::shared_ptr<std_srvs::srv::Trigger::Response> response) 
 {
     RCLCPP_INFO(this->get_logger(), "Signal generation triggered via service call.");
-
     int n_samples = static_cast<int>(duration_ / dt_);
 
     switch (signal_type_)
     {
     case SignalGenerator::SignalType::RBS:
         ext_signal_ = SignalGenerator::RBS(n_samples, n_signals_, rbs_config_);
-        RCLCPP_INFO(this->get_logger(), "Generated RBS signal");
+        RCLCPP_INFO(this->get_logger(), "############### Generated RBS signal ###############");
+        RCLCPP_INFO_STREAM(this->get_logger(), "- max: " << rbs_config_.max.transpose());
+        RCLCPP_INFO_STREAM(this->get_logger(), "- min: " << rbs_config_.min.transpose());
         break;
     
     case SignalGenerator::SignalType::RGS:
         ext_signal_ = SignalGenerator::RGS(n_samples, n_signals_, rgs_config_);
-        RCLCPP_INFO(this->get_logger(), "Generated RGS signal");
+        RCLCPP_INFO(this->get_logger(), "############### Generated RGS signal ###############");
+        RCLCPP_INFO_STREAM(this->get_logger(), "- mean: " << rgs_config_.mean.transpose());
+        RCLCPP_INFO_STREAM(this->get_logger(), "- stddev: " << rgs_config_.stddev.transpose());
         break;
     
     case SignalGenerator::SignalType::MULTISINE:
         ext_signal_ = SignalGenerator::Multisine(n_samples, n_signals_, multisine_config_);
-        RCLCPP_INFO(this->get_logger(), "Generated Multisine signal");
+        RCLCPP_INFO(this->get_logger(), "############### Generated Multisine signal ###############");
+        RCLCPP_INFO(this->get_logger(), "- n_sines: %d", multisine_config_.n_sines);
+        RCLCPP_INFO(this->get_logger(), "- grid_skips: %d", multisine_config_.grid_skips);
+        RCLCPP_INFO(this->get_logger(), "- n_trails: %d", multisine_config_.n_trails);
+        RCLCPP_INFO_STREAM(this->get_logger(), "- amplitudes: " << multisine_config_.amplitudes.transpose());
         break;
     
     case SignalGenerator::SignalType::CHIRP:
