@@ -13,10 +13,10 @@ def generate_launch_description():
         )
         
     node=Node(
-        package = 'xplorer_mini_control',
-        name = 'xplorer_mini_control_node',
+        package = 'xplorer_mini_sysid',
+        name = 'control_mux',
         namespace='xplorer_mini',
-        executable = 'xplorer_mini_robust_control',
+        executable = 'control_mux',
         output="screen",
         emulate_tty=True,
         parameters = [signal_config]
