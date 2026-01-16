@@ -51,7 +51,12 @@ rcl_interfaces::msg::SetParametersResult ControlMux::update_params_(const std::v
     result.successful = true;
     for (const auto &param : parameters) 
     {
-        if (param.get_name() == "control_mode") 
+        if (param.get_name() == "dt") 
+        {
+            dt_ = param.as_double();
+            RCLCPP_INFO(this->get_logger(), "Updated dt_: %f", dt_);
+        }
+        else if (param.get_name() == "control_mode") 
         {
             control_mode_ = param.as_string();
             RCLCPP_INFO(this->get_logger(), "Updated control_mode_: %s", control_mode_.c_str());
