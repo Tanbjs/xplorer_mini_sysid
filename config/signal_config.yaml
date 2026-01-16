@@ -1,7 +1,37 @@
-/control_mux:                 
-  ros__parameters:  
-    n_samples: 1000
-    n_signals: 6
-    uniform_config: ["min_switch_time", "1", "max_switch_time", "5", "amplitudes", "[0.2, 0.2, 0.2, 0.2, 0.2, 0.2]"]
-    pbrs_config: []
-    signal_config: ["imu_calib", "depth_hold", "log_data"]
+/**: 
+  ros__parameters:
+    # ==============================
+    # General Settings
+    # ==============================
+    control_mode: "closed"       # Options: "open", "closed", "noise_injected"
+    signal_type: "RBS"           # Options: "RBS", "RGS", "Chirp", "PRBS", "Multisine"
+    duration: 60.0               # Duration in seconds (Engineering Unit)
+    n_signals: 6                 # DOF of AUV (Surge, Sway, Heave, Roll, Pitch, Yaw)
+    
+    # Constant Bias added to the signal [Fx, Fy, Fz, Tx, Ty, Tz]
+    tau_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # ==============================
+    # RBS Configuration
+    # ==============================
+    # Nested structure maps to "rbs_config.min" automatically
+    rbs_config:
+      # Force (N) / Torque (Nm) limits
+      min: [-30.0, -30.0, -30.0, -5.0, -5.0, -5.0] 
+      max: [30.0, 30.0, 30.0, 5.0, 5.0, 5.0]
+
+    # ==============================
+    # RGS Configuration
+    # ==============================
+    rgs_config:
+      mean: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]         
+      stddev: [10.0, 10.0, 10.0, 2.0, 2.0, 2.0]     
+
+    # ==============================
+    # Multisine Configuration
+    # ==============================
+    multisine_config:
+      amplitudes: [15.0, 15.0, 15.0, 3.0, 3.0, 3.0]
+      grid_skips: 1     # Skip frequency bins to reduce crest factor
+      n_trails: 5       # Number of averaging trials
+      n_sines: 20       # Number of sine waves to sum
