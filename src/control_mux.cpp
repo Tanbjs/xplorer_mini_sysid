@@ -9,15 +9,15 @@ ControlMux::ControlMux() : Node("control_mux")
     );
 
     // Initialize publisher
-    wrench_cmd_pub_ = this->create_publisher<geometry_msgs::msg::WrenchStamped>("gnc/cmd_wrench/wrench", 10);
+    wrench_cmd_pub_ = this->create_publisher<geometry_msgs::msg::WrenchStamped>("gnc/cmd_wrench/control", 10);
     wrench_noise_pub_ = this->create_publisher<geometry_msgs::msg::WrenchStamped>("gnc/cmd_wrench/wrench_noise", 10);
 
     // Initialize subscriber
-    tau_desired_sub_ = this->create_subscription<geometry_msgs::msg::WrenchStamped>("gnc/cmd_wrench/tau_desired", 10, 
+    tau_desired_sub_ = this->create_subscription<geometry_msgs::msg::WrenchStamped>("gnc/cmd_wrench/wrench_desired", 10, 
         std::bind(&ControlMux::tau_desired_sub_callback_, this, std::placeholders::_1));
     
     // Initialize service server
-    signal_gen_trigger_srv_ = this->create_service<std_srvs::srv::Trigger>("signal_gen_trigger", 
+    signal_gen_trigger_srv_ = this->create_service<std_srvs::srv::Trigger>("gnc/control_mux/signal_gen_trigger", 
         std::bind(&ControlMux::signal_gen_trigger_srv_callback_, this, std::placeholders::_1, std::placeholders::_2));
 
     // Initialize timer
