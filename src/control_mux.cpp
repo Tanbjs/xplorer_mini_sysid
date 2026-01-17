@@ -10,6 +10,7 @@ ControlMux::ControlMux() : Node("control_mux")
 
     // Initialize publisher
     wrench_cmd_pub_ = this->create_publisher<geometry_msgs::msg::WrenchStamped>("gnc/cmd_wrench/wrench", 10);
+    wrench_noise_pub_ = this->create_publisher<geometry_msgs::msg::WrenchStamped>("gnc/cmd_wrench/wrench_noise", 10);
 
     // Initialize subscriber
     tau_desired_sub_ = this->create_subscription<geometry_msgs::msg::WrenchStamped>("gnc/cmd_wrench/tau_desired", 10, 
@@ -28,11 +29,12 @@ void ControlMux::init_params_()
 {
     // Initialize ROS parameters with default values
     dt_ = this->declare_parameter("dt", 0.1);
-    control_mode_ = this->declare_parameter("control_mode", "closed");
+    enable_offset_ = this->declare_parameter("enable_offset", false);
+    control_mode_ = ControlMux::stringToControlMode(this->declare_parameter("control_mode", "closed"));
     signal_type_ = SignalGenerator::stringToSignalType(this->declare_parameter("signal_type", "RBS"));
     duration_ = this->declare_parameter("duration", 0.0);
     n_signals_ = this->declare_parameter("n_signals", 0);
-    tau_offset_ = Eigen::Map<const Eigen::Vector<double, 6>>(this->declare_parameter("tau_offset", std::vector<double>(6, 0.0)).data());
+    wrench_offset_ = Eigen::Map<const Eigen::Vector<double, 6>>(this->declare_parameter("wrench_offset", std::vector<double>(6, 0.0)).data());
     
     rbs_config_.min = Eigen::Map<const Eigen::Vector<double, 6>>(this->declare_parameter("rbs_config.min", std::vector<double>(6, 0.0)).data());
     rbs_config_.max = Eigen::Map<const Eigen::Vector<double, 6>>(this->declare_parameter("rbs_config.max", std::vector<double>(6, 0.0)).data());
@@ -49,12 +51,13 @@ void ControlMux::init_params_()
     RCLCPP_INFO(this->get_logger(), "############## Initialized parameters ##############");
     RCLCPP_INFO(this->get_logger(), "### General parameters ###");
     RCLCPP_INFO(this->get_logger(), "- dt_: %f", dt_);
-    RCLCPP_INFO(this->get_logger(), "- control_mode_: %s", control_mode_.c_str());
+    RCLCPP_INFO(this->get_logger(), "- control_mode_: %s", this->get_parameter("control_mode").as_string().c_str());
+    RCLCPP_INFO(this->get_logger(), "- enable_offset_: %s", enable_offset_ ? "true" : "false");
     RCLCPP_INFO(this->get_logger(), "- signal_type_: %s", this->get_parameter("signal_type").as_string().c_str());
     RCLCPP_INFO(this->get_logger(), "### General signal parameters ###");
     RCLCPP_INFO(this->get_logger(), "- duration_: %f", duration_);
     RCLCPP_INFO(this->get_logger(), "- n_signals_: %d", n_signals_);
-    RCLCPP_INFO_STREAM(this->get_logger(), "- tau_offset_: " << tau_offset_.transpose());
+    RCLCPP_INFO_STREAM(this->get_logger(), "- wrench_offset_: " << wrench_offset_.transpose());
     RCLCPP_INFO(this->get_logger(), "### Random binary sequence generator parameters ###");
     RCLCPP_INFO_STREAM(this->get_logger(), "- rbs_config_.min: " << rbs_config_.min.transpose());
     RCLCPP_INFO_STREAM(this->get_logger(), "- rbs_config_.max: " << rbs_config_.max.transpose());
@@ -82,13 +85,18 @@ rcl_interfaces::msg::SetParametersResult ControlMux::update_params_(const std::v
         }
         else if (param.get_name() == "control_mode") 
         {
-            control_mode_ = param.as_string();
-            RCLCPP_INFO(this->get_logger(), "Updated control_mode_: %s", control_mode_.c_str());
+            control_mode_ = ControlMux::stringToControlMode(param.as_string());
+            RCLCPP_INFO(this->get_logger(), "Updated control_mode_: %s", this->get_parameter("control_mode").as_string().c_str());
+        }
+        else if (param.get_name() == "enable_offset") 
+        {
+            enable_offset_ = param.as_bool();
+            RCLCPP_INFO(this->get_logger(), "Updated enable_offset_: %s", enable_offset_ ? "true" : "false");
         } 
         else if (param.get_name() == "signal_type") 
         {
             signal_type_ = SignalGenerator::stringToSignalType(param.as_string());
-            RCLCPP_INFO(this->get_logger(), "Updated signal_type_: %s", param.as_string().c_str());
+            RCLCPP_INFO(this->get_logger(), "Updated signal_type_: %s", this->get_parameter("signal_type").as_string().c_str());
         }
         else if (param.get_name() == "duration") 
         {
@@ -100,10 +108,10 @@ rcl_interfaces::msg::SetParametersResult ControlMux::update_params_(const std::v
             n_signals_ = param.as_int();
             RCLCPP_INFO(this->get_logger(), "Updated n_signals_: %d", n_signals_);
         } 
-        else if (param.get_name() == "tau_offset") 
+        else if (param.get_name() == "wrench_offset") 
         {
-            tau_offset_ = Eigen::Map<const Eigen::Vector<double, 6>>(param.as_double_array().data());
-            RCLCPP_INFO_STREAM(this->get_logger(), "Updated tau_offset_: " << tau_offset_.transpose());
+            wrench_offset_ = Eigen::Map<const Eigen::Vector<double, 6>>(param.as_double_array().data());
+            RCLCPP_INFO_STREAM(this->get_logger(), "Updated wrench_offset_: " << wrench_offset_.transpose());
         } 
         else if (param.get_name() == "rbs_config.min")
         {
@@ -152,21 +160,76 @@ rcl_interfaces::msg::SetParametersResult ControlMux::update_params_(const std::v
 void ControlMux::tau_desired_sub_callback_(const geometry_msgs::msg::WrenchStamped::SharedPtr msg) 
 {
     // Extract desired torques from the message
-    tau_desired_(0) = msg->wrench.force.x;
-    tau_desired_(1) = msg->wrench.force.y;
-    tau_desired_(2) = msg->wrench.force.z;
-    tau_desired_(3) = msg->wrench.torque.x;
-    tau_desired_(4) = msg->wrench.torque.y;
-    tau_desired_(5) = msg->wrench.torque.z;
+    wrench_desired_(0) = msg->wrench.force.x;
+    wrench_desired_(1) = msg->wrench.force.y;
+    wrench_desired_(2) = msg->wrench.force.z;
+    wrench_desired_(3) = msg->wrench.torque.x;
+    wrench_desired_(4) = msg->wrench.torque.y;
+    wrench_desired_(5) = msg->wrench.torque.z;
 };
 
 void ControlMux::timer_callback_() 
 {
-    geometry_msgs::msg::WrenchStamped wrench_msg;
     wrench_msg.header.stamp = this->now();
-    // implement control mode logic
-    // Publish the wrench command
+    wrench_noise_msg.header.stamp = this->now();
+
+    switch (control_mode_) 
+    {
+        case ControlMode::OPEN_LOOP:
+            if (is_signal_gen_active_) 
+            {
+                wrench_cmd_ = ext_signal_.row(signal_index_).transpose();
+                signal_index_++;
+            } 
+            else 
+            {
+                wrench_cmd_.setZero();
+            }
+            break;
+
+        case ControlMode::CLOSED_LOOP:
+            wrench_cmd_ = wrench_desired_;
+            if (is_signal_gen_active_) 
+            {
+                wrench_cmd_ += ext_signal_.row(signal_index_).transpose();
+                signal_index_++;
+            }
+            else 
+            {
+                wrench_cmd_ = wrench_desired_;
+            }
+            break;
+
+        default:
+            RCLCPP_ERROR(this->get_logger(), "Unknown control mode!");
+            wrench_cmd_.setZero();
+            break;
+    }
+
+    // Add offset to last commanded torques if enabled
+    if (enable_offset_) {
+        wrench_cmd_ += wrench_offset_;
+    }
+
+    // Final wrench command
+    wrench_msg.wrench.force.x = wrench_cmd_(0);
+    wrench_msg.wrench.force.y = wrench_cmd_(1);
+    wrench_msg.wrench.force.z = wrench_cmd_(2);
+    wrench_msg.wrench.torque.x = wrench_cmd_(3);
+    wrench_msg.wrench.torque.y = wrench_cmd_(4);
+    wrench_msg.wrench.torque.z = wrench_cmd_(5);
+    
+    // Publish messages
+    wrench_noise_pub_->publish(wrench_noise_msg);
     wrench_cmd_pub_->publish(wrench_msg);
+
+    // Check if signal generation is completed
+    if (is_signal_gen_active_ && signal_index_ >= ext_signal_.rows()) 
+    {
+        is_signal_gen_active_ = false;
+        signal_index_ = 0;
+        RCLCPP_INFO(this->get_logger(), "Signal generation completed.");
+    }
 }
 
 void ControlMux::signal_gen_trigger_srv_callback_(
@@ -175,6 +238,7 @@ void ControlMux::signal_gen_trigger_srv_callback_(
 {
     RCLCPP_INFO(this->get_logger(), "Signal generation triggered via service call.");
     int n_samples = static_cast<int>(duration_ / dt_);
+    is_signal_gen_active_ = true;
 
     switch (signal_type_)
     {
@@ -218,7 +282,6 @@ void ControlMux::signal_gen_trigger_srv_callback_(
         return;
     }
 
-    signal_index_ = 0;  // Reset index
     response->success = true;
     response->message = "Signal generation started.";
 }

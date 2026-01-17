@@ -17,16 +17,32 @@ public:
     ~ControlMux();
 
 private:
+    // Control modes
+    enum class ControlMode 
+    {
+        OPEN_LOOP,
+        CLOSED_LOOP,
+    };
+    
+    inline ControlMode stringToControlMode(const std::string &mode_str) 
+    {
+        if (mode_str == "open") return ControlMode::OPEN_LOOP;
+        if (mode_str == "closed") return ControlMode::CLOSED_LOOP;
+    }
+    
     // Member variables for control modes and signal generation
+    bool is_signal_gen_active_ = false;
+    bool enable_offset_ = false;
     int signal_index_ = 0;
     int n_signals_ = 0;
     float dt_ = 0.1;
     float duration_ = 0.0;
-    std::string control_mode_;
+    ControlMode control_mode_ = ControlMode::CLOSED_LOOP;
 
-    Eigen::Vector<double, 6> tau_offset_ = {};
-    Eigen::Vector<double, 6> tau_desired_ = {};
-    Eigen::MatrixXd ext_signal_ = {};
+    Eigen::Vector<double, 6> wrench_desired_ = Eigen::VectorXd::Zero(6);
+    Eigen::Vector<double, 6> wrench_offset_ = Eigen::VectorXd::Zero(6);
+    Eigen::Vector<double, 6> wrench_cmd_ = Eigen::VectorXd::Zero(6);
+    Eigen::MatrixXd ext_signal_ = Eigen::MatrixXd::Zero(0, 0);
     
     SignalGenerator::SignalType signal_type_;
     SignalGenerator::RBSConfig rbs_config_;
@@ -45,7 +61,10 @@ private:
     void timer_callback_();
 
     // Declare publishers and callbacks
+    geometry_msgs::msg::WrenchStamped wrench_msg;
+    geometry_msgs::msg::WrenchStamped wrench_noise_msg;
     rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr wrench_cmd_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr wrench_noise_pub_;
 
     // Declare subscribers and callbacks
     rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr tau_desired_sub_;
