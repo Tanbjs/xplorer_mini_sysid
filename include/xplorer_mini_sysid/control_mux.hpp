@@ -76,7 +76,9 @@ private:
     void signal_gen_trigger_srv_callback_(
         const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
         std::shared_ptr<std_srvs::srv::Trigger::Response> response);
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr record_trigger_client_;
+
+    rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr record_client_;
+    std::shared_ptr<std_srvs::srv::SetBool::Request> record_request_;
 };
 
 #endif // __CONTROL_MUX_HPP__

@@ -20,7 +20,8 @@ ControlMux::ControlMux() : Node("control_mux")
     signal_gen_trigger_srv_ = this->create_service<std_srvs::srv::Trigger>("gnc/control_mux/signal_gen_trigger", 
         std::bind(&ControlMux::signal_gen_trigger_srv_callback_, this, std::placeholders::_1, std::placeholders::_2));
     
-    record_trigger_client_ = this->create_client<std_srvs::srv::Trigger>("gnc/record_trigger");
+    record_client_ = this->create_client<std_srvs::srv::SetBool>("gnc/record");
+    record_request_ = std::make_shared<std_srvs::srv::SetBool::Request>();
 
     // Initialize timer
     timer_ = this->create_wall_timer(std::chrono::duration<float>(dt_),
@@ -237,6 +238,18 @@ void ControlMux::timer_callback_()
         is_signal_gen_active_ = false;
         signal_index_ = 0;
         RCLCPP_INFO(this->get_logger(), "Signal generation completed.");
+
+        // Stop data recording via client call
+        if (enable_record_)
+        {
+            RCLCPP_INFO(this->get_logger(), "Stopping data recording via record service.");
+            record_request_->data = false;
+            while (!record_client_->wait_for_service(std::chrono::seconds(1))) 
+            {
+                RCLCPP_WARN(this->get_logger(), "Waiting for record service to be available...");
+            }
+            auto result_future = record_client_->async_send_request(record_request_);
+        }
     }
 }
 
@@ -296,11 +309,16 @@ void ControlMux::signal_gen_trigger_srv_callback_(
     // client call to start recording
     if (enable_record_)
     {
-        auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-        while (!record_trigger_client_->wait_for_service(std::chrono::seconds(1))) {
-            RCLCPP_WARN(this->get_logger(), "Waiting for record_trigger service to be available...");
-        }
-        auto result_future = record_trigger_client_->async_send_request(request);
+        if (signal_index_ == 0) 
+        {
+            RCLCPP_INFO(this->get_logger(), "Triggering data recording via record_trigger service.");
+            record_request_->data = true; 
+            while (!record_client_->wait_for_service(std::chrono::seconds(1))) 
+            {
+                RCLCPP_WARN(this->get_logger(), "Waiting for record_trigger service to be available...");
+            }
+            auto result_future = record_client_->async_send_request(record_request_);
+        }  
     }
 }
 
