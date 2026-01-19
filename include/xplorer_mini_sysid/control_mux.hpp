@@ -31,7 +31,6 @@ private:
     }
     
     // Member variables for control modes and signal generation
-    bool enable_record_ = false;
     bool is_signal_gen_active_ = false;
     bool enable_offset_ = false;
     int signal_index_ = 0;

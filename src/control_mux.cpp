@@ -33,7 +33,6 @@ void ControlMux::init_params_()
     // Initialize ROS parameters with default values
     dt_ = this->declare_parameter("dt", 0.1);
     enable_offset_ = this->declare_parameter("enable_offset", false);
-    enable_record_ = this->declare_parameter("enable_record", false);
     control_mode_ = ControlMux::stringToControlMode(this->declare_parameter("control_mode", "closed"));
     signal_type_ = SignalGenerator::stringToSignalType(this->declare_parameter("signal_type", "RBS"));
     duration_ = this->declare_parameter("duration", 0.0);
@@ -56,7 +55,6 @@ void ControlMux::init_params_()
     RCLCPP_INFO(this->get_logger(), "### General parameters ###");
     RCLCPP_INFO(this->get_logger(), "- dt_: %f", dt_);
     RCLCPP_INFO(this->get_logger(), "- control_mode_: %s", this->get_parameter("control_mode").as_string().c_str());
-    RCLCPP_INFO(this->get_logger(), "- enable_record_: %s", enable_record_ ? "true" : "false");
     RCLCPP_INFO(this->get_logger(), "- signal_type_: %s", this->get_parameter("signal_type").as_string().c_str());
     RCLCPP_INFO(this->get_logger(), "### General signal parameters ###");
     RCLCPP_INFO(this->get_logger(), "- duration_: %f", duration_);
@@ -86,11 +84,6 @@ rcl_interfaces::msg::SetParametersResult ControlMux::update_params_(const std::v
         {
             dt_ = param.as_double();
             RCLCPP_INFO(this->get_logger(), "Updated dt_: %f", dt_);
-        }
-        else if (param.get_name() == "enable_record") 
-        {
-            enable_record_ = param.as_bool();
-            RCLCPP_INFO(this->get_logger(), "Updated enable_record_: %s", enable_record_ ? "true" : "false");
         }
         else if (param.get_name() == "control_mode") 
         {
@@ -240,15 +233,15 @@ void ControlMux::timer_callback_()
         RCLCPP_INFO(this->get_logger(), "Signal generation completed.");
 
         // Stop data recording via client call
-        if (enable_record_)
+        if (record_client_ -> service_is_ready()) 
         {
             RCLCPP_INFO(this->get_logger(), "Stopping data recording via record service.");
-            record_request_->data = false;
-            while (!record_client_->wait_for_service(std::chrono::seconds(1))) 
-            {
-                RCLCPP_WARN(this->get_logger(), "Waiting for record service to be available...");
-            }
+            record_request_->data = false; 
             auto result_future = record_client_->async_send_request(record_request_);
+        } 
+        else 
+        {
+            RCLCPP_WARN(this->get_logger(), "Record service is not available to stop recording.");
         }
     }
 }
@@ -306,8 +299,8 @@ void ControlMux::signal_gen_trigger_srv_callback_(
     response->success = true;
     response->message = "Signal generation started.";
 
-    // client call to start recording
-    if (enable_record_)
+    // Check client is available and start data recording
+    if (record_client_ -> service_is_ready())
     {
         if (signal_index_ == 0) 
         {
@@ -318,7 +311,11 @@ void ControlMux::signal_gen_trigger_srv_callback_(
                 RCLCPP_WARN(this->get_logger(), "Waiting for record_trigger service to be available...");
             }
             auto result_future = record_client_->async_send_request(record_request_);
-        }  
+        }
+    }
+    else 
+    {
+        RCLCPP_WARN(this->get_logger(), "Record service is not available to start recording.");
     }
 }
 
