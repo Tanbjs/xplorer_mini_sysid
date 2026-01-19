@@ -19,7 +19,8 @@ ControlMux::ControlMux() : Node("control_mux")
     // Initialize service server
     signal_gen_trigger_srv_ = this->create_service<std_srvs::srv::Trigger>("gnc/control_mux/signal_gen_trigger", 
         std::bind(&ControlMux::signal_gen_trigger_srv_callback_, this, std::placeholders::_1, std::placeholders::_2));
-    
+    inject_control_noise_srv_ = this->create_service<std_srvs::srv::SetBool>("gnc/control_mux/inject_control_noise", 
+        std::bind(&ControlMux::inject_control_noise_srv_callback_, this, std::placeholders::_1, std::placeholders::_2));
     record_client_ = this->create_client<std_srvs::srv::SetBool>("gnc/record");
     record_request_ = std::make_shared<std_srvs::srv::SetBool::Request>();
 
@@ -180,11 +181,13 @@ void ControlMux::timer_callback_()
         case ControlMode::OPEN_LOOP:
             if (is_signal_gen_active_) 
             {
-                wrench_cmd_ = ext_signal_.row(signal_index_).transpose();
+                wrench_noise_ = ext_signal_.row(signal_index_).transpose();
+                wrench_cmd_ = wrench_noise_;
                 signal_index_++;
             } 
             else 
             {
+                wrench_noise_.setZero();
                 wrench_cmd_.setZero();
             }
             break;
@@ -193,18 +196,21 @@ void ControlMux::timer_callback_()
             wrench_cmd_ = wrench_desired_;
             if (is_signal_gen_active_) 
             {
-                wrench_cmd_ += ext_signal_.row(signal_index_).transpose();
+                wrench_noise_ = ext_signal_.row(signal_index_).transpose();
+                wrench_cmd_ += wrench_noise_;
                 signal_index_++;
             }
             else 
             {
                 wrench_cmd_ = wrench_desired_;
+                wrench_noise_.setZero();
             }
             break;
 
         default:
             RCLCPP_ERROR(this->get_logger(), "Unknown control mode!");
             wrench_cmd_.setZero();
+            wrench_noise_.setZero();
             break;
     }
 
@@ -213,6 +219,14 @@ void ControlMux::timer_callback_()
         wrench_cmd_ += wrench_offset_;
     }
 
+    // Noise wrench message
+    wrench_noise_msg.wrench.force.x = wrench_noise_(0);
+    wrench_noise_msg.wrench.force.y = wrench_noise_(1);
+    wrench_noise_msg.wrench.force.z = wrench_noise_(2);
+    wrench_noise_msg.wrench.torque.x = wrench_noise_(3);
+    wrench_noise_msg.wrench.torque.y = wrench_noise_(4);
+    wrench_noise_msg.wrench.torque.z = wrench_noise_(5);
+    
     // Final wrench command
     wrench_msg.wrench.force.x = wrench_cmd_(0);
     wrench_msg.wrench.force.y = wrench_cmd_(1);
@@ -246,58 +260,83 @@ void ControlMux::timer_callback_()
     }
 }
 
+std::tuple<bool, Eigen::MatrixXd> ControlMux::generate_signal_(int n_samples, int n_signals, SignalGenerator::SignalType signal_type) 
+{
+    // Declare output variables
+    bool is_gen = false;
+    Eigen::MatrixXd ext_signal = {};
+
+    switch (signal_type)
+    {
+        case SignalGenerator::SignalType::RBS:
+            is_gen = true;
+            ext_signal = SignalGenerator::RBS(n_samples, n_signals_, rbs_config_);
+            RCLCPP_INFO(this->get_logger(), "############### Generated RBS signal ###############");
+            RCLCPP_INFO_STREAM(this->get_logger(), "- max: " << rbs_config_.max.transpose());
+            RCLCPP_INFO_STREAM(this->get_logger(), "- min: " << rbs_config_.min.transpose());
+            break;
+
+        case SignalGenerator::SignalType::RGS:
+            is_gen = true;
+            ext_signal = SignalGenerator::RGS(n_samples, n_signals_, rgs_config_);
+            RCLCPP_INFO(this->get_logger(), "############### Generated RGS signal ###############");
+            RCLCPP_INFO_STREAM(this->get_logger(), "- mean: " << rgs_config_.mean.transpose());
+            RCLCPP_INFO_STREAM(this->get_logger(), "- stddev: " << rgs_config_.stddev.transpose());
+            break;
+
+        case SignalGenerator::SignalType::MULTISINE:
+            is_gen = true;
+            ext_signal = SignalGenerator::Multisine(n_samples, n_signals_, multisine_config_);
+            RCLCPP_INFO(this->get_logger(), "############### Generated Multisine signal ###############");
+            RCLCPP_INFO(this->get_logger(), "- n_sines: %d", multisine_config_.n_sines);
+            RCLCPP_INFO(this->get_logger(), "- grid_skips: %d", multisine_config_.grid_skips);
+            RCLCPP_INFO(this->get_logger(), "- n_trails: %d", multisine_config_.n_trails);
+            RCLCPP_INFO_STREAM(this->get_logger(), "- amplitudes: " << multisine_config_.amplitudes.transpose());
+            break;
+
+        case SignalGenerator::SignalType::CHIRP:
+            is_gen = true;
+            ext_signal = SignalGenerator::Chirp(n_samples, n_signals_, chirp_config_);
+            RCLCPP_INFO(this->get_logger(), "Generated Chirp signal");
+            break;
+
+        case SignalGenerator::SignalType::PRBS:
+            is_gen = true;
+            ext_signal = SignalGenerator::PRBS(n_samples, n_signals_, prbs_config_);
+            RCLCPP_INFO(this->get_logger(), "Generated PRBS signal");
+            break;
+
+        default:
+            is_gen = false;
+            ext_signal = Eigen::MatrixXd::Zero(0, 0);
+            RCLCPP_ERROR(this->get_logger(), "Unknown signal type!");
+            break;
+    }
+    return {is_gen, ext_signal};
+}
+
 void ControlMux::signal_gen_trigger_srv_callback_(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response) 
 {
     RCLCPP_INFO(this->get_logger(), "Signal generation triggered via service call.");
     int n_samples = static_cast<int>(duration_ / dt_);
-    is_signal_gen_active_ = true;
+    auto [is_gen, ext_signal] = generate_signal_(n_samples, n_signals_, signal_type_);
 
-    switch (signal_type_)
+    if (is_gen) 
     {
-    case SignalGenerator::SignalType::RBS:
-        ext_signal_ = SignalGenerator::RBS(n_samples, n_signals_, rbs_config_);
-        RCLCPP_INFO(this->get_logger(), "############### Generated RBS signal ###############");
-        RCLCPP_INFO_STREAM(this->get_logger(), "- max: " << rbs_config_.max.transpose());
-        RCLCPP_INFO_STREAM(this->get_logger(), "- min: " << rbs_config_.min.transpose());
-        break;
-    
-    case SignalGenerator::SignalType::RGS:
-        ext_signal_ = SignalGenerator::RGS(n_samples, n_signals_, rgs_config_);
-        RCLCPP_INFO(this->get_logger(), "############### Generated RGS signal ###############");
-        RCLCPP_INFO_STREAM(this->get_logger(), "- mean: " << rgs_config_.mean.transpose());
-        RCLCPP_INFO_STREAM(this->get_logger(), "- stddev: " << rgs_config_.stddev.transpose());
-        break;
-    
-    case SignalGenerator::SignalType::MULTISINE:
-        ext_signal_ = SignalGenerator::Multisine(n_samples, n_signals_, multisine_config_);
-        RCLCPP_INFO(this->get_logger(), "############### Generated Multisine signal ###############");
-        RCLCPP_INFO(this->get_logger(), "- n_sines: %d", multisine_config_.n_sines);
-        RCLCPP_INFO(this->get_logger(), "- grid_skips: %d", multisine_config_.grid_skips);
-        RCLCPP_INFO(this->get_logger(), "- n_trails: %d", multisine_config_.n_trails);
-        RCLCPP_INFO_STREAM(this->get_logger(), "- amplitudes: " << multisine_config_.amplitudes.transpose());
-        break;
-    
-    case SignalGenerator::SignalType::CHIRP:
-        ext_signal_ = SignalGenerator::Chirp(n_samples, n_signals_, chirp_config_);
-        RCLCPP_INFO(this->get_logger(), "Generated Chirp signal");
-        break;
-    
-    case SignalGenerator::SignalType::PRBS:
-        ext_signal_ = SignalGenerator::PRBS(n_samples, n_signals_, prbs_config_);
-        RCLCPP_INFO(this->get_logger(), "Generated PRBS signal");
-        break;
-    
-    default:
-        RCLCPP_ERROR(this->get_logger(), "Unknown signal type!");
+        is_signal_gen_active_ = true;
+        ext_signal_ = ext_signal;
+        signal_index_ = 0;
+        response->success = true;
+        response->message = "Signal generation started.";
+    } 
+    else 
+    {
+        is_signal_gen_active_ = false;
         response->success = false;
-        response->message = "Unknown signal type.";
-        return;
+        response->message = "Signal generation failed due to unknown signal type.";
     }
-
-    response->success = true;
-    response->message = "Signal generation started.";
 
     // Check client is available and start data recording
     if (record_client_ -> service_is_ready())
@@ -316,6 +355,30 @@ void ControlMux::signal_gen_trigger_srv_callback_(
     else 
     {
         RCLCPP_WARN(this->get_logger(), "Record service is not available to start recording.");
+    }
+}
+
+void ControlMux::inject_control_noise_srv_callback_(
+    const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+    std::shared_ptr<std_srvs::srv::SetBool::Response> response) 
+{
+    RCLCPP_INFO(this->get_logger(), "Inject control noise service called. Setting signal generation active.");
+    int n_samples = static_cast<int>(duration_ / dt_);
+    auto [is_gen, ext_signal] = generate_signal_(n_samples, n_signals_, signal_type_);
+
+    if (is_gen) 
+    {
+        is_signal_gen_active_ = true;
+        ext_signal_ = ext_signal;
+        signal_index_ = 0;
+        response->success = true;
+        response->message = "Signal generation started.";
+    } 
+    else 
+    {
+        is_signal_gen_active_ = false;
+        response->success = false;
+        response->message = "Signal generation failed due to unknown signal type.";
     }
 }
 

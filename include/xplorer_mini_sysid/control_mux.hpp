@@ -31,6 +31,7 @@ private:
     }
     
     // Member variables for control modes and signal generation
+    // member variables
     bool is_signal_gen_active_ = false;
     bool enable_offset_ = false;
     int signal_index_ = 0;
@@ -41,6 +42,7 @@ private:
 
     Eigen::Vector<double, 6> wrench_desired_ = Eigen::VectorXd::Zero(6);
     Eigen::Vector<double, 6> wrench_offset_ = Eigen::VectorXd::Zero(6);
+    Eigen::Vector<double, 6> wrench_noise_ = Eigen::VectorXd::Zero(6);
     Eigen::Vector<double, 6> wrench_cmd_ = Eigen::VectorXd::Zero(6);
     Eigen::MatrixXd ext_signal_ = Eigen::MatrixXd::Zero(0, 0);
     
@@ -50,6 +52,9 @@ private:
     SignalGenerator::ChirpConfig chirp_config_;
     SignalGenerator::PRBSConfig prbs_config_;
     SignalGenerator::MultisineConfig multisine_config_;
+
+    // member functions
+    std::tuple<bool, Eigen::MatrixXd> generate_signal_(int n_samples, int n_signals, SignalGenerator::SignalType signal_type);
 
     // ROS Parameters
     void init_params_();
@@ -75,7 +80,10 @@ private:
     void signal_gen_trigger_srv_callback_(
         const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
         std::shared_ptr<std_srvs::srv::Trigger::Response> response);
-
+    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr inject_control_noise_srv_;
+    void inject_control_noise_srv_callback_(
+        const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+        std::shared_ptr<std_srvs::srv::SetBool::Response> response);
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr record_client_;
     std::shared_ptr<std_srvs::srv::SetBool::Request> record_request_;
 };
