@@ -31,6 +31,7 @@ private:
     }
     
     // Member variables for control modes and signal generation
+    bool enable_record_ = false;
     bool is_signal_gen_active_ = false;
     bool enable_offset_ = false;
     int signal_index_ = 0;
@@ -75,6 +76,7 @@ private:
     void signal_gen_trigger_srv_callback_(
         const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
         std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr record_trigger_client_;
 };
 
 #endif // __CONTROL_MUX_HPP__

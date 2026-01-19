@@ -19,6 +19,8 @@ ControlMux::ControlMux() : Node("control_mux")
     // Initialize service server
     signal_gen_trigger_srv_ = this->create_service<std_srvs::srv::Trigger>("gnc/control_mux/signal_gen_trigger", 
         std::bind(&ControlMux::signal_gen_trigger_srv_callback_, this, std::placeholders::_1, std::placeholders::_2));
+    
+    record_trigger_client_ = this->create_client<std_srvs::srv::Trigger>("gnc/record_trigger");
 
     // Initialize timer
     timer_ = this->create_wall_timer(std::chrono::duration<float>(dt_),
@@ -30,6 +32,7 @@ void ControlMux::init_params_()
     // Initialize ROS parameters with default values
     dt_ = this->declare_parameter("dt", 0.1);
     enable_offset_ = this->declare_parameter("enable_offset", false);
+    enable_record_ = this->declare_parameter("enable_record", false);
     control_mode_ = ControlMux::stringToControlMode(this->declare_parameter("control_mode", "closed"));
     signal_type_ = SignalGenerator::stringToSignalType(this->declare_parameter("signal_type", "RBS"));
     duration_ = this->declare_parameter("duration", 0.0);
@@ -52,7 +55,7 @@ void ControlMux::init_params_()
     RCLCPP_INFO(this->get_logger(), "### General parameters ###");
     RCLCPP_INFO(this->get_logger(), "- dt_: %f", dt_);
     RCLCPP_INFO(this->get_logger(), "- control_mode_: %s", this->get_parameter("control_mode").as_string().c_str());
-    RCLCPP_INFO(this->get_logger(), "- enable_offset_: %s", enable_offset_ ? "true" : "false");
+    RCLCPP_INFO(this->get_logger(), "- enable_record_: %s", enable_record_ ? "true" : "false");
     RCLCPP_INFO(this->get_logger(), "- signal_type_: %s", this->get_parameter("signal_type").as_string().c_str());
     RCLCPP_INFO(this->get_logger(), "### General signal parameters ###");
     RCLCPP_INFO(this->get_logger(), "- duration_: %f", duration_);
@@ -82,6 +85,11 @@ rcl_interfaces::msg::SetParametersResult ControlMux::update_params_(const std::v
         {
             dt_ = param.as_double();
             RCLCPP_INFO(this->get_logger(), "Updated dt_: %f", dt_);
+        }
+        else if (param.get_name() == "enable_record") 
+        {
+            enable_record_ = param.as_bool();
+            RCLCPP_INFO(this->get_logger(), "Updated enable_record_: %s", enable_record_ ? "true" : "false");
         }
         else if (param.get_name() == "control_mode") 
         {
@@ -284,6 +292,16 @@ void ControlMux::signal_gen_trigger_srv_callback_(
 
     response->success = true;
     response->message = "Signal generation started.";
+
+    // client call to start recording
+    if (enable_record_)
+    {
+        auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+        while (!record_trigger_client_->wait_for_service(std::chrono::seconds(1))) {
+            RCLCPP_WARN(this->get_logger(), "Waiting for record_trigger service to be available...");
+        }
+        auto result_future = record_trigger_client_->async_send_request(request);
+    }
 }
 
 ControlMux::~ControlMux() 
