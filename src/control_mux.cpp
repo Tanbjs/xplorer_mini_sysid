@@ -306,11 +306,11 @@ void ControlMux::signal_gen_trigger_srv_callback_(
         {
             RCLCPP_INFO(this->get_logger(), "Triggering data recording via record_trigger service.");
             record_request_->data = true; 
-            while (!record_client_->wait_for_service(std::chrono::seconds(1))) 
-            {
-                RCLCPP_WARN(this->get_logger(), "Waiting for record_trigger service to be available...");
-            }
             auto result_future = record_client_->async_send_request(record_request_);
+        }
+        else
+        {
+            RCLCPP_WARN(this->get_logger(), "Signal generation is already active. Data recording not triggered.");
         }
     }
     else 
