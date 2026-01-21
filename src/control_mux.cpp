@@ -362,23 +362,33 @@ void ControlMux::inject_control_noise_srv_callback_(
     const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
     std::shared_ptr<std_srvs::srv::SetBool::Response> response) 
 {
-    RCLCPP_INFO(this->get_logger(), "Inject control noise service called. Setting signal generation active.");
-    int n_samples = static_cast<int>(duration_ / dt_);
-    auto [is_gen, ext_signal] = generate_signal_(n_samples, n_signals_, signal_type_);
+    if (request->data)
+    {
+        RCLCPP_INFO(this->get_logger(), "Inject control noise service called. Setting signal generation active.");
+        int n_samples = static_cast<int>(duration_ / dt_);
+        auto [is_gen, ext_signal] = generate_signal_(n_samples, n_signals_, signal_type_);
 
-    if (is_gen) 
+        if (is_gen) 
+        {
+            is_signal_gen_active_ = true;
+            ext_signal_ = ext_signal;
+            signal_index_ = 0;
+            response->success = true;
+            response->message = "Signal generation started.";
+        } 
+        else 
+        {
+            is_signal_gen_active_ = false;
+            response->success = false;
+            response->message = "Signal generation failed due to unknown signal type.";
+        }
+    }
+    else
     {
-        is_signal_gen_active_ = true;
-        ext_signal_ = ext_signal;
-        signal_index_ = 0;
-        response->success = true;
-        response->message = "Signal generation started.";
-    } 
-    else 
-    {
+        RCLCPP_INFO(this->get_logger(), "Inject control noise service called. Stopping signal generation.");
         is_signal_gen_active_ = false;
-        response->success = false;
-        response->message = "Signal generation failed due to unknown signal type.";
+        response->success = true;
+        response->message = "Signal generation stopped.";
     }
 }
 
