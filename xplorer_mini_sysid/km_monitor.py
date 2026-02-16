@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+import logging
+import warnings
+warnings.filterwarnings("ignore")
+logging.getLogger("mlflow").setLevel(logging.ERROR)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
+logging.getLogger("matplotlib").setLevel(logging.ERROR)
+import os
+os.environ["MLFLOW_TRACKING_INSECURE_TLS"] = "true"
 
 import numpy as np
 import mlflow
@@ -6,6 +14,7 @@ import rclpy
 from rclpy.node import Node
 import message_filters
 
+from rclpy.qos import qos_profile_sensor_data
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import TwistStamped, WrenchStamped
 
@@ -24,6 +33,10 @@ class KMMonitor(Node):
         self.u_timeout = 0.5        # Fallback to zero input if wrench msg is delayed
         self.last_wrench_time = self.get_clock().now()
         
+        self.tmp_dmdc_nu = np.zeros(6)   # Temporary storage for current velocity state
+        self.tmp_edmdc_nu = np.zeros(6)  # Temporary storage for current velocity state
+        self.tmp_nn_nu = np.zeros(6)     # Temporary storage for current velocity state
+
         self.nu_true = np.zeros(6)  # Current velocity state
         self.u_true = np.zeros(6)   # Current control input (wrench)
 
@@ -40,7 +53,7 @@ class KMMonitor(Node):
         # --- Subscribers & Message Synchronization ---
         # Synchronize Odom and Wrench to ensure state-action pairs (x, u) are time-aligned
         self.odom_sub = message_filters.Subscriber(self, Odometry, "gnc/odom_filtered")
-        self.wrench_sub = message_filters.Subscriber(self, WrenchStamped, "gnc/est_tau")
+        self.wrench_sub = message_filters.Subscriber(self, WrenchStamped, "gnc/est_tau", qos_profile=qos_profile_sensor_data)
         
         # ApproximateTimeSynchronizer allows small timestamp differences (slop)
         self.ts = message_filters.ApproximateTimeSynchronizer(
@@ -58,7 +71,7 @@ class KMMonitor(Node):
     def init_model(self, model_name):
         """Fetches the latest version from MLflow Model Registry and unwraps it."""
         try:
-            versions = self.client.get_latest_versions(model_name, stages=["None"])
+            versions = self.client.get_latest_versions(model_name)
             latest = versions[0].version
             model_uri = f"models:/{model_name}/{latest}"
             loaded = mlflow.pyfunc.load_model(model_uri)
@@ -105,13 +118,20 @@ class KMMonitor(Node):
         # Input vector format: [velocity_states, control_inputs]
         # Execute and publish predictions for enabled models
         if self.dmdc_model:
-            self.publish_twist(self.pub_dmdc, self.dmdc_model.predict(context=None, model_input={'x': nu, 'u': u}))
+            y_next = self.dmdc_model.predict(context=None, model_input={'x': nu, 'u': u})
+            self.publish_twist(self.pub_dmdc, self.tmp_dmdc_nu)
+            self.tmp_dmdc_nu = y_next # store x{k+1} to publish in next iteration (one-step delay)
+
 
         if self.edmdc_model:
-            self.publish_twist(self.pub_edmdc, self.edmdc_model.predict(context=None, model_input={'x': nu, 'u': u}))
+            x_next, y_next = self.edmdc_model.predict(context=None, model_input={'x': nu, 'u': u})
+            self.publish_twist(self.pub_edmdc, self.tmp_edmdc_nu)
+            self.tmp_edmdc_nu = y_next # store x{k+1} to publish in next iteration (one-step delay)
 
         if self.nn_model:
-            self.publish_twist(self.pub_nn, self.nn_model.predict(context=None, model_input={'x': nu, 'u': u}))
+            x_next, y_next = self.nn_model.predict(context=None, model_input={'x': nu, 'u': u})
+            self.publish_twist(self.pub_nn, self.tmp_nn_nu)
+            self.tmp_nn_nu = y_next # store x{k+1} to publish in next iteration (one-step delay)
 
     def publish_twist(self, pub, data):
         """Helper to publish numpy array as TwistStamped message."""
