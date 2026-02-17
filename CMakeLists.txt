@@ -7,6 +7,8 @@ endif()
 
 # ========================== Find dependencies =========================
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
+
 find_package(Eigen3 3.4 REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -19,6 +21,15 @@ target_include_directories(signal_generate_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(signal_generate_lib PUBLIC Eigen3::Eigen)
+
+# ========================== Python Module =========================
+ament_python_install_package(${PROJECT_NAME})
+
+install(PROGRAMS 
+  xplorer_mini_sysid/km_monitor.py
+  xplorer_mini_sysid/kmpc.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 # ========================== Executable =========================
 add_executable(control_mux src/control_mux.cpp)
