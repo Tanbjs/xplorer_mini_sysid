@@ -7,7 +7,8 @@ namespace SysID
         Eigen::MatrixXd RBS(const int &n_samples, const int &n_signals, const RBSConfig &config) 
         {
             Eigen::MatrixXd signal = Eigen::MatrixXd::Zero(n_samples, n_signals);
-            std::default_random_engine generator;
+            std::random_device rd;
+            std::mt19937 generator(rd());
             for (int i = 0; i < n_signals; ++i) 
             {
                 std::uniform_real_distribution<double> distribution(config.min(i), config.max(i));
@@ -22,7 +23,8 @@ namespace SysID
         Eigen::MatrixXd RGS(const int &n_samples, const int &n_signals, const RGSConfig &config) 
         {
             Eigen::MatrixXd signal = Eigen::MatrixXd::Zero(n_samples, n_signals);
-            std::default_random_engine generator;
+            std::random_device rd;
+            std::mt19937 generator(rd());
             for (int i = 0; i < n_signals; ++i) 
             {
                 std::normal_distribution<double> distribution(config.mean(i), config.stddev(i));

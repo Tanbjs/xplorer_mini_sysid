@@ -4,7 +4,7 @@
     # General Settings
     # ==============================
     control_mode: "closed"       # Options: "open", "closed", "noise_injected"
-    signal_type: "RBS"           # Options: "RBS", "RGS", "Chirp", "PRBS", "Multisine"
+    signal_type: "RGS"           # Options: "RBS", "RGS", "Chirp", "PRBS", "Multisine"
     duration: 60.0               # Duration in seconds (Engineering Unit)
     n_signals: 6                 # DOF of AUV (Surge, Sway, Heave, Roll, Pitch, Yaw)
     
@@ -17,15 +17,15 @@
     # Nested structure maps to "rbs_config.min" automatically
     rbs_config:
       # Force (N) / Torque (Nm) limits
-      min: [-50.0, -50.0, -50.0, -50.0, -50.0, -50.0] 
-      max: [50.0, 50.0, 50.0, 50.0, 50.0, 50.0]
+      min: [-20.0, -20.0, -20.0, -20.0, -20.0, -20.0] 
+      max: [20.0, 20.0, 20.0, 20.0, 20.0, 20.0]
 
     # ==============================
     # RGS Configuration
     # ==============================
     rgs_config:
       mean: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]         
-      stddev: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]     
+      stddev: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]     
 
     # ==============================
     # Multisine Configuration
