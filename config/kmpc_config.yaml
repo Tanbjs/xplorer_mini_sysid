@@ -1,0 +1,18 @@
+# ==================================================================
+/**: # This will put all the parameters in every node
+  ros__parameters:
+    uuv_name: 'xplorer_mini'
+
+    model_name: 'dmdc'
+    
+    # Position Loop PID Gains
+    Kp_pos: [0.5, 0.5, 0.7, 1.1, 1.31, 1.5]
+    Ki_pos: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
+    Kd_pos: [0.01, 0.015, 0.03, 0.015, 0.0, 0.0]
+    integral_limit: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+    max_vel: [1.0, 1.0, 1.0, 1.0, 0.5, 0.5]
+
+    # MPC Weights
+    Q_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    R_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    S_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
