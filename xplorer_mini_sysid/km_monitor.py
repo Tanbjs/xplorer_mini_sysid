@@ -49,6 +49,10 @@ class KMMonitor(Node):
         self.pub_dmdc = self.create_publisher(TwistStamped, "gnc/sysid/dmdc/one_step", 10)
         self.pub_edmdc = self.create_publisher(TwistStamped, "gnc/sysid/edmdc/one_step", 10)
         self.pub_nn = self.create_publisher(TwistStamped, "gnc/sysid/nn/one_step", 10)
+        
+        self.pub_dmdc_err = self.create_publisher(TwistStamped, "gnc/sysid/dmdc/one_step_error", 10)
+        self.pub_edmdc_err = self.create_publisher(TwistStamped, "gnc/sysid/edmdc/one_step_error", 10)
+        self.pub_nn_err = self.create_publisher(TwistStamped, "gnc/sysid/nn/one_step_error", 10)
 
         # --- Subscribers & Message Synchronization ---
         # Synchronize Odom and Wrench to ensure state-action pairs (x, u) are time-aligned
@@ -120,17 +124,19 @@ class KMMonitor(Node):
         if self.dmdc_model:
             y_next = self.dmdc_model.predict(context=None, model_input={'x': nu, 'u': u})
             self.publish_twist(self.pub_dmdc, self.tmp_dmdc_nu)
+            self.publish_twist(self.pub_dmdc_err, self.tmp_dmdc_nu - nu)  # Publish error for DMDC
             self.tmp_dmdc_nu = y_next # store x{k+1} to publish in next iteration (one-step delay)
-
 
         if self.edmdc_model:
             x_next, y_next = self.edmdc_model.predict(context=None, model_input={'x': nu, 'u': u})
             self.publish_twist(self.pub_edmdc, self.tmp_edmdc_nu)
+            self.publish_twist(self.pub_edmdc_err, self.tmp_edmdc_nu - nu)  # Publish error for EDMDc
             self.tmp_edmdc_nu = y_next # store x{k+1} to publish in next iteration (one-step delay)
 
         if self.nn_model:
             x_next, y_next = self.nn_model.predict(context=None, model_input={'x': nu, 'u': u})
             self.publish_twist(self.pub_nn, self.tmp_nn_nu)
+            self.publish_twist(self.pub_nn_err, self.tmp_nn_nu - nu)  # Publish error for NN
             self.tmp_nn_nu = y_next # store x{k+1} to publish in next iteration (one-step delay)
 
     def publish_twist(self, pub, data):
