@@ -21,6 +21,6 @@ def generate_launch_description():
         emulate_tty=True,
         parameters = [signal_config]
     )
-
+    
     ld.add_action(node)
     return ld
