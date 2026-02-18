@@ -2,10 +2,9 @@
 import logging
 import warnings
 import os
-import shutil
 import time
+import shutil
 
-# --- 0. Environment Setup & Safety ---
 import matplotlib
 matplotlib.use('Agg')
 
@@ -28,9 +27,11 @@ from xplorer_mini_common_interfaces.msg import AuvStatus
 import mlflow
 from mlflow.tracking import MlflowClient
 import numpy as np
+import torch
 import scipy.linalg
 from acados_template import AcadosOcp, AcadosOcpSolver
-from casadi import SX, vertcat, DM, mtimes
+from casadi import SX, DM
+from kmc.utils.model_wrapper import DMDcWrapper, EDMDcWrapper, DeepModelWrapper
 
 class CascadeKoopmanControl(Node):
     def __init__(self):
@@ -44,20 +45,26 @@ class CascadeKoopmanControl(Node):
         self.mlflow_client = MlflowClient(tracking_uri=self.mlflow_uri)
 
         # --- 2. State Variables ---
+        self.eta = np.zeros(6)
         self.eta_error = np.zeros(6)
         self.vel = np.zeros(6)
+        self.m_rb = np.zeros(6)  # Placeholder for mass parameters, not used in control but can be logged
         
         # --- 3. Parameter Declaration ---
         self.declare_parameters(namespace='', parameters=[
+            ('model_name', 'dmdc'),
+            ('rigid_body_mass', np.zeros(6).tolist()),  # Placeholder, not used in control but can be logged
             ('Kp_pose', [1.0] * 6),
             ('Ki_pose', [0.0] * 6),
             ('Kd_pose', [0.0] * 6),
             ('integral_limit', [5.0] * 6),
             ('max_vel', [1.0, 1.0, 1.0, 1.0, 0.5, 0.5]),
-            ('model_name', 'dmdc'),
+            ('rho_penalty', 100.0),
+            ('N_horizon', 10),
             ('Q_diag', [20.0, 20.0, 20.0, 10.0, 10.0, 10.0]),
             ('R_diag', [0.1] * 6),
-            ('S_diag', [1.0] * 6)
+            ('max_tau', [200.0] * 6),
+            ('max_delta_tau', [50.0] * 6)
         ])
 
         self.add_on_set_parameters_callback(self.parameters_callback)
@@ -71,16 +78,16 @@ class CascadeKoopmanControl(Node):
             max_vel=np.array(self.get_parameter('max_vel').value),
             logger=self.get_logger()
         )
-
-        q_diag = np.array(self.get_parameter('Q_diag').value)
-        r_diag = np.array(self.get_parameter('R_diag').value)
-        s_diag = np.array(self.get_parameter('S_diag').value)
-
+        
         self.velocity_controller = VelocityController(
             dt=self.dt, 
-            Q_diag=q_diag, 
-            R_diag=r_diag, 
-            S_diag=s_diag,
+            Q_diag=np.array(self.get_parameter('Q_diag').value), 
+            R_diag=np.array(self.get_parameter('R_diag').value), 
+            max_vel=np.array(self.get_parameter('max_vel').value),
+            max_tau=np.array(self.get_parameter('max_tau').value),
+            max_delta_tau=np.array(self.get_parameter('max_delta_tau').value),
+            rho_penalty=self.get_parameter('rho_penalty').value,
+            N_horizon=self.get_parameter('N_horizon').value,
             node_name=self.get_name(),
             logger=self.get_logger()
         )
@@ -100,27 +107,48 @@ class CascadeKoopmanControl(Node):
         for param in params:
             if param.name == 'Kp_pose':
                 self.position_controller.kp = np.array(param.value)
+                self.get_logger().info(f"Updated Kp_pose: {self.position_controller.kp}")
             elif param.name == 'Ki_pose':
                 self.position_controller.ki = np.array(param.value)
+                self.get_logger().info(f"Updated Ki_pose: {self.position_controller.ki}")
             elif param.name == 'Kd_pose':
                 self.position_controller.kd = np.array(param.value)
+                self.get_logger().info(f"Updated Kd_pose: {self.position_controller.kd}")
             elif param.name == 'integral_limit':
                 self.position_controller.int_limit = np.array(param.value)
+                self.get_logger().info(f"Updated integral limits: {self.position_controller.int_limit}")
             elif param.name == 'max_vel':
                 self.position_controller.max_vel = np.array(param.value)
+                self.get_logger().info(f"Updated max velocity limits: {self.position_controller.max_vel}")
             elif param.name == 'Q_diag':
                 self.velocity_controller.Q_diag = np.array(param.value)
-                self.velocity_controller.update_weights() # Trigger update
+                self.get_logger().info(f"Updated Q_diag: {self.velocity_controller.Q_diag}")
             elif param.name == 'R_diag':
                 self.velocity_controller.R_diag = np.array(param.value)
-                self.velocity_controller.update_weights() # Trigger update
-            elif param.name == 'S_diag':
-                self.velocity_controller.S_diag = np.array(param.value)
-                self.velocity_controller.update_weights() # Trigger update
+                self.get_logger().info(f"Updated R_diag: {self.velocity_controller.R_diag}")
+            elif param.name == 'rho_penalty':
+                self.velocity_controller.rho_penalty = param.value
+                self.get_logger().info(f"Updated rho_penalty: {self.velocity_controller.rho_penalty}")
+                self.velocity_controller._init_acados_solver() # Rebuild solver with new horizon
+            elif param.name == 'N_horizon':
+                self.velocity_controller.N = param.value
+                self.velocity_controller._init_acados_solver() # Rebuild solver with new horizon
+            elif param.name == 'max_tau':
+                self.velocity_controller.max_tau = np.array(param.value)
+                self.get_logger().info(f"Updated max control input limits: {self.velocity_controller.max_tau}")
+                self.velocity_controller._init_acados_solver() # Rebuild solver with new constraints
+            elif param.name == 'max_delta_tau':
+                self.velocity_controller.max_delta_tau = np.array(param.value)
+                self.get_logger().info(f"Updated max change in control input limits: {self.velocity_controller.max_delta_tau}")
+                self.velocity_controller._init_acados_solver() # Rebuild solver with new constraints
+            elif param.name == "rigid_body_mass":
+                self.get_logger().info(f"Received new mass parameters: {param.value}")
+                self.m_rb = np.array(param.value)
 
         return SetParametersResult(successful=True)
     
     def odometry_callback(self, msg):
+        self.eta = np.array(msg.eta)
         self.eta_error = np.array(msg.eta_e) 
         self.vel = np.array(msg.nu)
     
@@ -138,15 +166,18 @@ class CascadeKoopmanControl(Node):
             return
 
         # 1. Outer Loop
-        v_ref = self.position_controller.compute_control(self.eta_error, self.dt)
-        
+        v_ref = self.position_controller.compute_control(-self.eta_error, self.dt)
+        J,_,_ = self.eulerang_nwu(self.eta[3], self.eta[4], self.eta[5])
+        v_ref_body = np.linalg.inv(J) @ v_ref  # Tranvsform to body frame
+
         # 2. Inner Loop
-        # IMPORTANT: Pass current velocity and reference velocity
-        thrust_cmd = self.velocity_controller.compute_control(self.vel, v_ref)
+        tau_cmd = self.velocity_controller.compute_control(self.vel, v_ref_body)
+        tau_cmd = np.asarray(tau_cmd).flatten()
+        tau_cmd = np.clip(tau_cmd, -200, 200)
 
         # 3. Publish
-        self.publish_wrench(thrust_cmd)
-        self.publish_twist(self.twist_pub, v_ref) # Debug: Publish desired twist
+        self.publish_wrench(tau_cmd)
+        self.publish_twist(self.twist_pub, v_ref_body)
 
         t_exec = time.time() - t_start
         if t_exec > self.dt:
@@ -201,6 +232,35 @@ class CascadeKoopmanControl(Node):
         msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z = float(nu[3]), float(nu[4]), float(nu[5])
         publisher.publish(msg)
 
+    def eulerang_nwu(self, phi, theta, psi):
+        """
+        J matrix for NWU (North-West-Up)
+        phi: roll, theta: pitch, psi: yaw
+        """
+        c_phi, s_phi = np.cos(phi), np.sin(phi)
+        c_th,  s_th  = np.cos(theta), np.sin(theta)
+        c_ps,  s_ps  = np.cos(psi), np.sin(psi)
+
+        # Rotation matrix R (NWU)
+        R = np.array([
+            [c_ps*c_th, -s_ps*c_phi + c_ps*s_th*s_phi,  s_ps*s_phi + c_ps*c_phi*s_th],
+            [s_ps*c_th,  c_ps*c_phi + s_phi*s_th*s_ps, -c_ps*s_phi + s_th*s_ps*c_phi],
+            [-s_th,      c_th*s_phi,                   c_th*c_phi]
+        ])
+        
+        # Transformation matrix T (for angular velocities)
+        T = np.array([
+            [1,  0,       -s_th],
+            [0,  c_phi,    c_th*s_phi],
+            [0, -s_phi,    c_th*c_phi]
+        ])
+        
+        J = np.zeros((6, 6))
+        J[0:3, 0:3] = R
+        J[3:6, 3:6] = T
+        
+        return J, R, T
+
 
 class PositionController:
     def __init__(self, kp, ki, kd, int_limit, max_vel, logger=None):
@@ -211,239 +271,237 @@ class PositionController:
 
     def compute_control(self, error, dt):
         if dt <= 0: return np.zeros(6)
-        self.integral += error * dt
-        self.integral = np.clip(self.integral, -self.int_limit, self.int_limit) 
+        
         derivative = (error - self.prev_error) / dt
-        v_cmd = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
-        v_cmd = np.clip(v_cmd, -self.max_vel, self.max_vel)
+        v_p = self.kp * error
+        v_d = self.kd * derivative
+        v_unsat = v_p + (self.ki * self.integral) + v_d
+
+        # Saturation
+        v_cmd = np.clip(v_unsat, -self.max_vel, self.max_vel)
+        
+        # Anti-windup: Only integrate if we're not saturated in the direction of the error
+        is_saturated = (v_unsat > self.max_vel) | (v_unsat < -self.max_vel)
+        same_direction = np.sign(error) == np.sign(v_unsat)
+        stop_integrating = is_saturated & same_direction
+        self.integral += (~stop_integrating) * (error * dt)
+        self.integral = np.clip(self.integral, -self.int_limit, self.int_limit)
+
         self.prev_error = error
+
         return v_cmd
 
 
 class VelocityController:
-    def __init__(self, dt, Q_diag, R_diag, S_diag, node_name, N_horizon=20, logger=None):
+    def __init__(self, dt, Q_diag, R_diag, max_vel, max_tau, max_delta_tau, rho_penalty, node_name, N_horizon=20, logger=None):
         self.dt = dt
         self.N = N_horizon
-        self.Q_diag = Q_diag
-        self.R_diag = R_diag
-        self.S_diag = S_diag
         self.node_name = node_name
         self.logger = logger
+        self.Q = np.diag(np.array(Q_diag))
+        self.R = np.diag(np.array(R_diag))
         self.solver = None
         self.is_ready = False
-        self.u_prev_scaled = None # Keep track of scaled control action
+        self.u_prev_scaled = None
+        self.max_vel = np.array(max_vel)
+        self.max_tau = np.array(max_tau)
+        self.max_delta_tau = np.array(max_delta_tau)
 
     def setup_model(self, wrapper):
-        self.wrapper = wrapper
-        self.A = wrapper.A; self.B = wrapper.B; self.C = wrapper.C
-        # SCALERS MUST BE AVAILABLE
-        self.scaler_x = getattr(wrapper, 'scaler_x', None) # Not used in KMPC usually if lifted
-        self.scaler_u = wrapper.scaler_u
-        self.scaler_y = wrapper.scaler_y 
-        
-        new_nu = self.B.shape[1]
-        
-        # Reset previous control when model changes to avoid jump
-        self.u_prev_scaled = np.zeros(new_nu)
-            
-        if self.logger: self.logger.info(f"Model Set: nu={new_nu}")
-
-        if hasattr(wrapper.model, 'encode'):
-            self.lift_func = lambda x: wrapper.model.encode(x).detach().cpu().numpy()
-        elif hasattr(wrapper.model, 'lift'):
-            self.lift_func = wrapper.model.lift
-        else:
-            self.lift_func = lambda x: x
-
-        self._init_acados_solver()
-        self.is_ready = True
-
-    def _init_acados_solver(self):
-        # 1. Clean previous build
-        generated_path = f'c_generated_code_{self.node_name}'
-        if os.path.exists(generated_path):
-            shutil.rmtree(generated_path)
-
-        # 2. Data Prepare
         try:
-            raw_A = np.array(self.A, dtype=np.float64).flatten()
-            raw_B = np.array(self.B, dtype=np.float64).flatten()
-            raw_C = np.array(self.C, dtype=np.float64).flatten()
+            # 1. Load Model Matrices
+            self.A = np.array(wrapper.A, dtype=np.float64)
+            self.B = np.array(wrapper.B, dtype=np.float64)
+            self.C = np.array(wrapper.C, dtype=np.float64)
 
-            nz_orig = int(np.sqrt(len(raw_A))) 
-            nu = int(len(raw_B) / nz_orig)
-            ny = int(len(raw_C) / nz_orig)
-            nx_aug = nz_orig + nu
+            # 2. Setup Scalers & Lift Function 
+            self.scaler_x = getattr(wrapper, "scaler_x", None)
+            self.scaler_y = getattr(wrapper, "scaler_y", None)
+            self.scaler_u = getattr(wrapper, "scaler_u", None)
 
-            np_A = np.reshape(raw_A, (nz_orig, nz_orig), order='C')
-            np_B = np.reshape(raw_B, (nz_orig, nu), order='C')
-            np_C = np.reshape(raw_C, (ny, nz_orig), order='C')
+            if isinstance(wrapper, DeepModelWrapper):
+                self.lift_func = lambda x: np.concatenate([
+                    x, 
+                    wrapper.model.model.encoder(torch.tensor(x).float()).detach().numpy().flatten()
+                ])
+            elif isinstance(wrapper, EDMDcWrapper):
+                self.lift_func = lambda x: wrapper.model._obs_func.transform(x.reshape(1, -1)).flatten()
+            elif isinstance(wrapper, DMDcWrapper):
+                self.lift_func = lambda x: x  
 
-            if self.logger:
-                self.logger.info(f"Acados Shapes -> nz:{nz_orig}, nu:{nu}, ny:{ny}")
-                
-            self.dims = {'nz': nz_orig, 'nu': nu, 'ny': ny, 'nx_aug': nx_aug} # Save dims for later use
+            # 3. Init Control Memory
+            nu = self.B.shape[1]
+            self.u_prev_scaled = np.zeros(nu)
+
+            # 4. Cleanup & Build Solver
+            self._init_acados_solver()
+            self.is_ready = True
+            
+            if self.logger: self.logger.info(f"Simple MPC initialized for: {self.node_name}")
 
         except Exception as e:
-            if self.logger: self.logger.error(f"Prep Error: {e}")
-            return
+            if self.logger: self.logger.error(f"Setup failed: {e}")
+            raise e
 
-        # 3. Setup OCP
+    def _init_acados_solver(self):
+
+        # --- 0. Clean old files before creating new solver ---
+        json_file = f'acados_{self.node_name}.json'
+        if os.path.exists(json_file): os.remove(json_file)
+        if os.path.exists('c_generated_code'): shutil.rmtree('c_generated_code')
+
+        # --- 1. Define Dimensions ---
+        nz = self.A.shape[0]
+        nu = self.B.shape[1]
+        ny = self.C.shape[0]
+        nx_aug = nz + nu
         ocp = AcadosOcp()
-        ocp.code_export_directory = generated_path
         ocp.model.name = f'kmpc_{self.node_name}'
+        ocp.dims.N = self.N
 
-        sym_x = SX.sym('x', nx_aug, 1)
-        sym_u = SX.sym('u', nu, 1) # delta_u
+        # --- 2. Model Dynamics (Linear Augmented) ---
+        sym_x = SX.sym('x', nx_aug)
+        sym_u = SX.sym('u', nu)
+        ocp.model.x, ocp.model.u = sym_x, sym_u
 
-        ocp.model.x = sym_x
-        ocp.model.u = sym_u
-
-        # --- Augmented Dynamics ---
-        A_aug = np.block([[np_A, np_B], [np.zeros((nu, nz_orig)), np.eye(nu)]])
-        B_aug = np.block([[np_B], [np.eye(nu)]])
+        # A_bar = [A B; 0 I], B_bar = [B; I]
+        A_bar = np.block([[self.A, self.B], [np.zeros((nu, nz)), np.eye(nu)]])
+        B_bar = np.block([[self.B], [np.eye(nu)]])
         
-        ocp.model.disc_dyn_expr = mtimes(SX(DM(A_aug)), sym_x) + mtimes(SX(DM(B_aug)), sym_u)
+        # Dynamics: x_{k+1} = A_bar * x_k + B_bar * u_k
+        ocp.model.disc_dyn_expr = DM(A_bar) @ sym_x + DM(B_bar) @ sym_u
 
-        # --- Dimensions ---
-        ny_total = ny + nu + nu
-        ocp.dims.nx = nx_aug
-        ocp.dims.nu = nu
-        ocp.dims.ny = ny_total
-        ocp.dims.ny_e = ny 
-
-        # --- Cost ---
+        # --- 3. Cost Function (Simple Tracking) ---
         ocp.cost.cost_type = 'LINEAR_LS'
         ocp.cost.cost_type_e = 'LINEAR_LS'
         
-        def to_c(arr): return np.ascontiguousarray(arr, dtype=np.float64)
+        ny_total = ny + nu 
+        ocp.dims.ny = ny_total
+        ocp.dims.ny_e = ny
 
+        # 
         Vx = np.zeros((ny_total, nx_aug))
-        Vx[:ny, :nz_orig] = np_C              
-        Vx[ny+nu:, nz_orig:] = np.eye(nu)  
-        ocp.cost.Vx = to_c(Vx)
+        Vx[:ny, :nz] = self.C   # Track output
+        ocp.cost.Vx = Vx
 
+        # Terminal cost only on output error
+        Vx_e = np.zeros((ny, nx_aug))  
+        Vx_e[:ny, :nz] = self.C       
+        ocp.cost.Vx_e = Vx_e
+
+        # Vu penalizes change in control input (delta u)
         Vu = np.zeros((ny_total, nu))
-        Vu[ny:ny+nu, :] = np.eye(nu)         
-        Vu[ny+nu:, :] = np.eye(nu)           
-        ocp.cost.Vu = to_c(Vu)
-        
-        Vx_e = np.zeros((ny, nx_aug))
-        Vx_e[:ny, :nz_orig] = np_C
-        ocp.cost.Vx_e = to_c(Vx_e)
+        Vu[ny:, :] = np.eye(nu) # Penalize control effort
+        ocp.cost.Vu = Vu
 
-        # Weights
-        W_block = [np.diag(self.Q_diag), np.diag(self.R_diag), np.diag(self.S_diag)]
-        W_matrix = scipy.linalg.block_diag(*W_block)
-        W_e_matrix = np.diag(self.Q_diag)
+        # Weight Matrices
+        W = scipy.linalg.block_diag(self.Q, self.R)
+        ocp.cost.W = W
+        ocp.cost.W_e = self.Q
 
-        ocp.cost.W = to_c(W_matrix)
-        ocp.cost.W_e = to_c(W_e_matrix)
-        
-        ocp.cost.yref = to_c(np.zeros(ny_total))
-        ocp.cost.yref_e = to_c(np.zeros(ny))
+        # Placeholders for reference
+        ocp.cost.yref = np.zeros(ny_total)
+        ocp.cost.yref_e = np.zeros(ny)
 
-        # --- Constraints ---
-        # NOTE: Check if scaler_u is available to scale delta_u limits if needed. 
-        # For now, assuming delta_u_max is in scaled domain or robust enough.
-        delta_u_max = 0.5 
-        ocp.constraints.lbu = np.array([-delta_u_max] * nu)
-        ocp.constraints.ubu = np.array([delta_u_max] * nu)
+        # === Constraints (THE SIMPLE PART) ===
+        # --- Initial Condition ---
+        ocp.constraints.idxbx_0 = np.arange(nx_aug)
+        ocp.constraints.lbx_0 = np.zeros(nx_aug) 
+        ocp.constraints.ubx_0 = np.zeros(nx_aug) 
+
+        # --- Augmented state constraints ---
+        nx_aug = nz + nu
+        lbx = np.zeros(nx_aug)
+        ubx = np.zeros(nx_aug)
+
+        # Case 1: bound augmented state using lifted velocity limits
+        # x_max_phys = self.max_vel.reshape(1, -1)
+        # x_max_sc = self.scaler_x.transform(x_max_phys).flatten()
+
+        # z_max_sc = self.lift_func(x_max_sc) 
+        # z_min_sc = self.lift_func(-x_max_sc)
+
+        # lbx[:nz] = z_min_sc
+        # ubx[:nz] = z_max_sc
+
+        # u_limit_sc = self.scaler_u.transform(np.array([[200.0]*nu]))[0]
+        # lbx[nz:] = -u_limit_sc
+        # ubx[nz:] = u_limit_sc
+
+        # ocp.constraints.idxbx = np.arange(nx_aug)
+        # ocp.constraints.lbx = lbx
+        # ocp.constraints.ubx = ubx
+
+        # Case 2: bound output (y = Cz) 
+        # [Cz; u_prev] from [z; u_prev]
+        # Matrix size: (ny+nu) x (nz+nu)
+        D_mat = np.block([
+            [self.C, np.zeros((ny, nu))],
+            [np.zeros((nu, nz)), np.eye(nu)]
+        ])
+
+        v_max_sc = self.scaler_x.transform(self.max_vel.reshape(1, -1))[0]
+        tau_max_sc = self.scaler_u.transform(self.max_tau.reshape(1, -1))[0]
+
+        y_max = np.concatenate([v_max_sc, tau_max_sc])
+        y_min = -y_max
+
+        # General Linear Constraints (lg <= C*x + D*u <= ug)
+        ocp.constraints.C = D_mat 
+        ocp.constraints.D = np.zeros((D_mat.shape[0], nu))
+        ocp.constraints.lg = y_min
+        ocp.constraints.ug = y_max
+
+        # === input of augmented system (delta tau) ===
+        delta_tau_max_sc = self.scaler_u.transform(self.max_delta_tau.reshape(1, -1))[0]  # Max change in control input
+        ocp.constraints.lbu = np.array(-delta_tau_max_sc)
+        ocp.constraints.ubu = np.array(delta_tau_max_sc)
         ocp.constraints.idxbu = np.arange(nu)
-        ocp.constraints.x0 = np.zeros(nx_aug)
 
-        # --- Options ---
-        ocp.solver_options.N_horizon = self.N
+        # === Solver Options ===
         ocp.solver_options.tf = self.N * self.dt
-        ocp.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
-        ocp.solver_options.nlp_solver_type = 'SQP_RTI'
         ocp.solver_options.integrator_type = 'DISCRETE'
+        ocp.solver_options.nlp_solver_type = 'SQP_RTI'
+        ocp.solver_options.nlp_solver_max_iter = 1
+        ocp.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM' 
+        ocp.solver_options.qp_solver_cond_N = 5 
+        ocp.solver_options.hessian_approx = 'GAUSS_NEWTON'
         ocp.solver_options.print_level = 0
-        
-        json_file = f'acados_ocp_{self.node_name}.json'
+        ocp.solver_options.qp_solver_iter_max = 50
+        ocp.solver_options.tol = 1e-4 
+
         self.solver = AcadosOcpSolver(ocp, json_file=json_file)
 
-    def update_weights(self):
-        """Updates the cost weights in the active solver."""
-        if self.solver is None: return
+    def compute_control(self, x, y_ref):
+        if not self.is_ready: return np.zeros(self.u_prev_scaled.shape)
 
-        # Reconstruct W matrix with current Q, R, S
-        W_block = [np.diag(self.Q_diag), np.diag(self.R_diag), np.diag(self.S_diag)]
-        W_new = scipy.linalg.block_diag(*W_block)
-        W_e_new = np.diag(self.Q_diag)
+        # 1. Prepare State
+        x_scaled = self.scaler_x.transform(x.reshape(1, -1)).flatten()
+        z_scaled = self.lift_func(x_scaled)
         
-        # Ensure C-contiguous
-        W_new = np.ascontiguousarray(W_new, dtype=np.float64)
-        W_e_new = np.ascontiguousarray(W_e_new, dtype=np.float64)
+        # State
+        xi_t = np.concatenate([z_scaled, self.u_prev_scaled])
 
-        try:
-            for i in range(self.N): 
-                self.solver.cost_set(i, "W", W_new)
-            self.solver.cost_set(self.N, "W", W_e_new)
-            if self.logger: self.logger.info("MPC Weights updated in solver.")
-        except Exception as e:
-            if self.logger: self.logger.error(f"Failed to update weights: {e}")
+        # 2. Set Initial Condition 
+        self.solver.set(0, "lbx", xi_t)
+        self.solver.set(0, "ubx", xi_t)
 
-    def compute_control(self, v_curr_raw, v_ref_raw):
-        if not self.is_ready: return np.zeros(6)
+        # 3. Set Reference
+        y_ref_scaled = self.scaler_y.transform(y_ref.reshape(1, -1)).flatten()
+        yref_vec = np.concatenate([y_ref_scaled, np.zeros(self.u_prev_scaled.size)]) # Ref for State + 0 penalty for Delta u
         
-        try:
-            # 1. Scale Inputs
-            # transform() needs 2D array (1, n_features)
-            v_curr_scaled = self.scaler_y.transform(v_curr_raw.reshape(1, -1))
-            
-            # 2. Lift State (Koopman)
-            # Input: Scaled measurement -> Output: Lifted state z
-            z_curr = self.lift_func(v_curr_scaled).flatten() 
-            
-            # 3. Prepare Initial State x0_aug = [z_k; u_{k-1}]
-            # Note: u_prev_scaled is already scaled
-            x0_aug = np.concatenate([z_curr, self.u_prev_scaled])
+        for i in range(self.N):
+            self.solver.set(i, "yref", yref_vec)
+        self.solver.set(self.N, "yref", y_ref_scaled) # Terminal ref (no input)
 
-            # 4. Prepare Reference
-            v_ref_scaled = self.scaler_y.transform(v_ref_raw.reshape(1, -1)).flatten()
-            
-            # 5. Set Initial Condition
-            self.solver.set(0, "lbx", x0_aug)
-            self.solver.set(0, "ubx", x0_aug)
-            
-            # 6. Set References
-            # Cost vector y = [y_out; delta_u; u_act]
-            # We want y_out -> v_ref, delta_u -> 0, u_act -> 0 (or maintain)
-            nu = self.dims['nu']
-            y_ref = np.concatenate([v_ref_scaled, np.zeros(nu), np.zeros(nu)])
-            y_ref_e = v_ref_scaled # Terminal reference
+        # 4. Solve
+        status = self.solver.solve()
+        delta_u_scaled = self.solver.get(0, "u")
 
-            for i in range(self.N): 
-                self.solver.set(i, "yref", y_ref)
-            self.solver.set(self.N, "yref", y_ref_e)
-
-            # 7. Solve
-            status = self.solver.solve()
-            if status != 0: 
-                if self.logger: self.logger.warn(f"Acados returned status {status}")
-                # Fallback: return previous real control or zero?
-                # Using zero might be safer than stuck throttle in underwater
-                return np.zeros(6) 
-
-            # 8. Get Result (Delta U)
-            delta_u_scaled = self.solver.get(0, "u")
-            
-            # 9. Integrate & Unscale
-            u_next_scaled = self.u_prev_scaled + delta_u_scaled
-            
-            # Update state for next loop
-            self.u_prev_scaled = u_next_scaled 
-            
-            # Convert to physical units (Newtons/Torque)
-            u_real = self.scaler_u.inverse_transform(u_next_scaled.reshape(1, -1)).flatten()
-            
-            return u_real
-
-        except Exception as e:
-            if self.logger: self.logger.error(f"MPC Compute Fail: {e}")
-            return np.zeros(6)
-
+        # 5. Integrate & Return
+        self.u_prev_scaled += delta_u_scaled
+        return self.scaler_u.inverse_transform(self.u_prev_scaled.reshape(1, -1)).flatten()
+  
 def main(args=None):
     rclpy.init(args=args)
     node = CascadeKoopmanControl()
