@@ -54,9 +54,9 @@ class CascadeKoopmanControl(Node):
         self.declare_parameters(namespace='', parameters=[
             ('model_name', 'dmdc'),
             ('rigid_body_mass', np.zeros(6).tolist()),  # Placeholder, not used in control but can be logged
-            ('Kp_pose', [1.0] * 6),
-            ('Ki_pose', [0.0] * 6),
-            ('Kd_pose', [0.0] * 6),
+            ('Kp_pos', [1.0] * 6),
+            ('Ki_pos', [0.0] * 6),
+            ('Kd_pos', [0.0] * 6),
             ('integral_limit', [5.0] * 6),
             ('max_vel', [1.0, 1.0, 1.0, 1.0, 0.5, 0.5]),
             ('rho_penalty', 100.0),
@@ -71,9 +71,9 @@ class CascadeKoopmanControl(Node):
 
         # --- 4. Controllers Init ---
         self.position_controller = PositionController(
-            kp=np.array(self.get_parameter('Kp_pose').value),
-            ki=np.array(self.get_parameter('Ki_pose').value),
-            kd=np.array(self.get_parameter('Kd_pose').value),
+            kp=np.array(self.get_parameter('Kp_pos').value),
+            ki=np.array(self.get_parameter('Ki_pos').value),
+            kd=np.array(self.get_parameter('Kd_pos').value),
             int_limit=np.array(self.get_parameter('integral_limit').value),
             max_vel=np.array(self.get_parameter('max_vel').value),
             logger=self.get_logger()
@@ -105,15 +105,15 @@ class CascadeKoopmanControl(Node):
     def parameters_callback(self, params):
         # ... (Parameter update logic remains mostly the same) ...
         for param in params:
-            if param.name == 'Kp_pose':
+            if param.name == 'Kp_pos':
                 self.position_controller.kp = np.array(param.value)
-                self.get_logger().info(f"Updated Kp_pose: {self.position_controller.kp}")
-            elif param.name == 'Ki_pose':
+                self.get_logger().info(f"Updated Kp_pos: {self.position_controller.kp}")
+            elif param.name == 'Ki_pos':
                 self.position_controller.ki = np.array(param.value)
-                self.get_logger().info(f"Updated Ki_pose: {self.position_controller.ki}")
-            elif param.name == 'Kd_pose':
+                self.get_logger().info(f"Updated Ki_pos: {self.position_controller.ki}")
+            elif param.name == 'Kd_pos':
                 self.position_controller.kd = np.array(param.value)
-                self.get_logger().info(f"Updated Kd_pose: {self.position_controller.kd}")
+                self.get_logger().info(f"Updated Kd_pos: {self.position_controller.kd}")
             elif param.name == 'integral_limit':
                 self.position_controller.int_limit = np.array(param.value)
                 self.get_logger().info(f"Updated integral limits: {self.position_controller.int_limit}")
@@ -123,9 +123,11 @@ class CascadeKoopmanControl(Node):
             elif param.name == 'Q_diag':
                 self.velocity_controller.Q_diag = np.array(param.value)
                 self.get_logger().info(f"Updated Q_diag: {self.velocity_controller.Q_diag}")
+                self.velocity_controller.update_weights(Q_diag=self.velocity_controller.Q_diag) # Update weights online
             elif param.name == 'R_diag':
                 self.velocity_controller.R_diag = np.array(param.value)
                 self.get_logger().info(f"Updated R_diag: {self.velocity_controller.R_diag}")
+                self.velocity_controller.update_weights(R_diag=self.velocity_controller.R_diag) # Update weights online
             elif param.name == 'rho_penalty':
                 self.velocity_controller.rho_penalty = param.value
                 self.get_logger().info(f"Updated rho_penalty: {self.velocity_controller.rho_penalty}")
@@ -471,6 +473,26 @@ class VelocityController:
         ocp.solver_options.tol = 1e-4 
 
         self.solver = AcadosOcpSolver(ocp, json_file=json_file)
+
+    def update_weights(self, Q_diag=None, R_diag=None):
+        """Update cost matrices online without rebuilding the solver."""
+        if Q_diag is not None:
+            self.Q = np.diag(Q_diag)
+        if R_diag is not None:
+            self.R = np.diag(R_diag)
+        
+        # Rebuild W matrix (ny_total x ny_total)
+        new_W = scipy.linalg.block_diag(self.Q, self.R)
+        
+        # update running cost weight matrix (0 to N-1)
+        for i in range(self.N):
+            self.solver.cost_set(i, "W", new_W)
+        
+        # update Terminal Weight (only Q)
+        self.solver.cost_set(self.N, "W", self.Q)
+        
+        if self.logger:
+            self.logger.info("MPC Weights updated online.")
 
     def compute_control(self, x, y_ref):
         if not self.is_ready: return np.zeros(self.u_prev_scaled.shape)
