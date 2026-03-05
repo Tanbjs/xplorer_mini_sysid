@@ -8,7 +8,16 @@
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+<<<<<<< HEAD
   <buildtool_depend>ament_cmake_python</buildtool_depend>
+=======
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>xplorer_mini_cpp_utils</depend>
+>>>>>>> dbd2a0b (feat: add ocean current)
   
   <depend>rclcpp</depend>
   <depend>rclpy</depend> <depend>std_msgs</depend>

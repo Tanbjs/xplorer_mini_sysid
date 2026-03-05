@@ -7,6 +7,7 @@
 #include <geometry_msgs/msg/wrench_stamped.hpp>
 
 #include "xplorer_mini_sysid/signal_generate_lib.hpp"
+#include "xplorer_mini_sysid/ocean_current_lib.hpp"
 
 using namespace SysID;
 
@@ -38,12 +39,17 @@ private:
     int n_signals_ = 0;
     float dt_ = 0.1;
     float duration_ = 0.0;
+    EigenAUVState auv_state_;
+    AUVDynamicParams auv_dyn;
     ControlMode control_mode_ = ControlMode::CLOSED_LOOP;
 
     Eigen::Vector<double, 6> wrench_desired_ = Eigen::VectorXd::Zero(6);
     Eigen::Vector<double, 6> wrench_offset_ = Eigen::VectorXd::Zero(6);
     Eigen::Vector<double, 6> wrench_noise_ = Eigen::VectorXd::Zero(6);
     Eigen::Vector<double, 6> wrench_cmd_ = Eigen::VectorXd::Zero(6);
+    Eigen::Vector<double, 6> oc_disturbance = Eigen::VectorXd::Zero(6);
+    Eigen::Vector<double, 6> nu_ = Eigen::VectorXd::Zero(6);
+    Eigen::Vector<double, 6> eta_ = Eigen::VectorXd::Zero(6);
     Eigen::MatrixXd ext_signal_ = Eigen::MatrixXd::Zero(0, 0);
     
     SignalGenerator::SignalType signal_type_;
@@ -52,6 +58,10 @@ private:
     SignalGenerator::ChirpConfig chirp_config_;
     SignalGenerator::PRBSConfig prbs_config_;
     SignalGenerator::MultisineConfig multisine_config_;
+
+    // Ocean current generator
+    std::unique_ptr<OceanEnvironment::OceanCurrentGenerator> oc_generator_;
+    OceanEnvironment::OceanCurrentConfig oc_config_;
 
     // member functions
     std::tuple<bool, Eigen::MatrixXd> generate_signal_(int n_samples, int n_signals, SignalGenerator::SignalType signal_type);
@@ -68,11 +78,15 @@ private:
     // Declare publishers and callbacks
     geometry_msgs::msg::WrenchStamped wrench_msg;
     geometry_msgs::msg::WrenchStamped wrench_noise_msg;
+    geometry_msgs::msg::WrenchStamped ocean_current_msg;
+    rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr ocean_current_pub_;
     rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr wrench_cmd_pub_;
     rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr wrench_noise_pub_;
 
     // Declare subscribers and callbacks
     rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr tau_desired_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+    void odom_sub_callback_(const nav_msgs::msg::Odometry::SharedPtr msg);
     void tau_desired_sub_callback_(const geometry_msgs::msg::WrenchStamped::SharedPtr msg);
 
     // Declare service servers and callbacks

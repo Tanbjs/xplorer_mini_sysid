@@ -1,0 +1,26 @@
+/**: 
+  ros__parameters:
+    ocean_current:
+      enable: false
+      seed: 255
+      Vc:
+        mu: 0.0
+        mean_w: 0.0
+        var_w: 0.01
+        init_val: 0.1
+        min_val: -0.5
+        max_val: 0.5
+      alpha:
+        mu: 0.0
+        mean_w: 0.0
+        var_w: 0.00060923  # 2*(pi/180)^2
+        init_val: 0.0
+        min_val: -3.14159265
+        max_val: 3.14159265
+      beta:
+        mu: 0.0
+        mean_w: 0.0
+        var_w: 0.00060923  # 2*(pi/180)^2
+        init_val: 0.0
+        min_val: -3.14159265
+        max_val: 3.14159265

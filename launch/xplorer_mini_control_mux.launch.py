@@ -9,9 +9,18 @@ def generate_launch_description():
     signal_config = os.path.join(
         get_package_share_directory('xplorer_mini_sysid'),
             'config',
-            'signal_config.yaml'
-        )
-        
+            'signal_config.yaml' )
+
+    auv_param = os.path.join(
+        get_package_share_directory('xplorer_mini_descriptions'),
+            'robots',
+            'xplorer_mini_dynamic_parameters.yaml')
+    
+    ocean_current_param = os.path.join(
+        get_package_share_directory('xplorer_mini_sysid'),
+            'config',
+            'ocean_current_config.yaml')    
+
     node=Node(
         package = 'xplorer_mini_sysid',
         name = 'control_mux',
@@ -19,7 +28,7 @@ def generate_launch_description():
         executable = 'control_mux',
         output="screen",
         emulate_tty=True,
-        parameters = [signal_config]
+        parameters = [signal_config, auv_param, ocean_current_param]
     )
     
     ld.add_action(node)

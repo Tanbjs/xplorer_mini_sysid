@@ -14,6 +14,7 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(xplorer_mini_cpp_utils REQUIRED)
 
 # ========================== Library =========================
 add_library(signal_generate_lib SHARED src/signal_generate_lib.cpp)
@@ -22,6 +23,7 @@ target_include_directories(signal_generate_lib PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(signal_generate_lib PUBLIC Eigen3::Eigen)
 
+<<<<<<< HEAD
 # ========================== Python Module =========================
 ament_python_install_package(${PROJECT_NAME})
 
@@ -30,13 +32,24 @@ install(PROGRAMS
   xplorer_mini_sysid/kmpc.py
   DESTINATION lib/${PROJECT_NAME}
 )
+=======
+add_library(ocean_current_lib SHARED src/ocean_current_lib.cpp)
+target_include_directories(ocean_current_lib PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(ocean_current_lib PUBLIC xplorer_mini_cpp_utils::kinematics_utils)
+>>>>>>> dbd2a0b (feat: add ocean current)
 
 # ========================== Executable =========================
 add_executable(control_mux src/control_mux.cpp)
 target_include_directories(control_mux PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_link_libraries(control_mux signal_generate_lib)
+target_link_libraries(control_mux 
+  signal_generate_lib 
+  ocean_current_lib
+)
+
 ament_target_dependencies(control_mux
   rclcpp
   std_msgs
@@ -45,7 +58,7 @@ ament_target_dependencies(control_mux
 )
 
 # ========================== Install =========================
-install(TARGETS signal_generate_lib
+install(TARGETS signal_generate_lib ocean_current_lib
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
