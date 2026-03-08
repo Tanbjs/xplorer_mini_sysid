@@ -23,7 +23,12 @@ target_include_directories(signal_generate_lib PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(signal_generate_lib PUBLIC Eigen3::Eigen)
 
-<<<<<<< HEAD
+add_library(ocean_current_lib SHARED src/ocean_current_lib.cpp)
+target_include_directories(ocean_current_lib PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(ocean_current_lib PUBLIC xplorer_mini_cpp_utils::kinematics_utils)
+
 # ========================== Python Module =========================
 ament_python_install_package(${PROJECT_NAME})
 
@@ -32,13 +37,6 @@ install(PROGRAMS
   xplorer_mini_sysid/kmpc.py
   DESTINATION lib/${PROJECT_NAME}
 )
-=======
-add_library(ocean_current_lib SHARED src/ocean_current_lib.cpp)
-target_include_directories(ocean_current_lib PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
-target_link_libraries(ocean_current_lib PUBLIC xplorer_mini_cpp_utils::kinematics_utils)
->>>>>>> dbd2a0b (feat: add ocean current)
 
 # ========================== Executable =========================
 add_executable(control_mux src/control_mux.cpp)

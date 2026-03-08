@@ -5,24 +5,23 @@
   <version>0.0.0</version>
   <description>System Identification with Koopman controller</description>
   <maintainer email="benjaset.m@gmail.com">tanbjs</maintainer>
+  <maintainer email="warit.tanaprasitpattana@gmail.com">ween</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-<<<<<<< HEAD
   <buildtool_depend>ament_cmake_python</buildtool_depend>
-=======
 
   <depend>rclcpp</depend>
+  <depend>rclpy</depend> 
+
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
-  <depend>std_srvs</depend>
-  <depend>xplorer_mini_cpp_utils</depend>
->>>>>>> dbd2a0b (feat: add ocean current)
+  <depend>nav_msgs</depend>
   
-  <depend>rclcpp</depend>
-  <depend>rclpy</depend> <depend>std_msgs</depend>
-  <depend>geometry_msgs</depend>
-  <depend>nav_msgs</depend> <depend>std_srvs</depend>
+  <depend>std_srvs</depend>
+  
+  <depend>xplorer_mini_cpp_utils</depend>
+  <depend>eigen</depend>
 
   <exec_depend>python3-acados</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
