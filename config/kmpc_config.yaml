@@ -3,27 +3,124 @@
   ros__parameters:
     uuv_name: 'xplorer_mini'
 
-    model_name: 'edmdc'  # 'dmdc', 'edmdc', or 'deep vanilla'
-    
-    integral_limit: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]  # Integral windup limits for each DOF
-    max_vel: [1.0, 1.0, 0.5, 0.25, 0.25, 0.5]  # Max velocity limits for each DOF
+    # Select MPC algorithm
+    # 'standard', 'aug_delayed_input', 'aug_error_output', or 'implicit_rigid_tube'
 
-    # Position Loop PID Gains
-    Kp_pos: [0.5, 0.5, 0.7, 1.1, 1.31, 1.5]
+    # =============================================== DMDc gains for different MPC formulations ==============================================
+    model_name: 'dmdc'
+    version: 'v1'  # Version of the model to use (e.g., 'v1', 'v2', etc.)
+
+    # PID + standard MPC gains
+    Kp_pos: [1.2, 0.5, 1.0, 1.1, 1.31, 1.5]
     Ki_pos: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
     Kd_pos: [0.01, 0.015, 0.03, 0.015, 0.0, 0.0]
-    
-    # MPC Weights
+    integral_limit: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]        # Integral windup limits for each DOF
+    mpc_algorithm: 'standard'
     N_horizon: 20
-    rho_penalty: 1.0  # Penalty on slack variables for soft constraints
-    Q_diag: [1.15, 1.15, 1.15, 1.0, 1.0, 1.0]
-    R_diag: [0.15,0.15,0.5,0.25,0.25,0.25]
-    R_rate_diag: [0.1, 0.1, 0.1, 0.05, 0.05, 0.05]  # Penalty on rate of change of control inputs
+    Q_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]               # State error penalty weights
+    R_abs_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]             # Penalty on absolute control input 
+    max_vel: [1.0, 1.0, 0.5, 0.25, 0.25, 0.5]             # Max velocity limits for each DOF
+    max_tau: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]   # Max control input limits for each DOF
 
-    max_tau: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]  # Max control input limits for each DOF
-    max_delta_tau: [20.0, 20.0, 20.0, 20.0, 20.0, 20.0]  # Max change in control input per time step
+    # PID + augmented delayed input MPC with absolute input penalty
+    # Kp_pos: [1.0, 0.5, 0.7, 1.1, 1.31, 1.5]
+    # Ki_pos: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
+    # Kd_pos: [0.01, 0.015, 0.03, 0.015, 0.0, 0.0]
+    # integral_limit: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]        # Integral windup limits for each DOF
+    # mpc_algorithm: 'aug_delayed_input'
+    # include_abs_input: True  
+    # N_horizon: 10
+    # Q_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]                # State error penalty weights
+    # R_abs_diag: [1.0,1.0,1.0,1.0,1.0,1.0]                 # Penalty on absolute control input 
+    # R_rate_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]           # Penalty on control input rate of change
+    # max_vel: [1.0, 1.0, 0.5, 0.25, 0.25, 0.5]             # Max velocity limits for each DOF
+    # max_tau: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]   # Max control input limits for each DOF
+    # max_delta_tau: [20.0, 20.0, 20.0, 20.0, 20.0, 20.0]   # Max change in control input per time step
 
-    # DMDc gain
-    # Q_diag: [1.15, 1.15, 1.15, 1.0, 1.0, 1.0]
-    # R_diag: [0.15,0.15,0.5,0.25,0.25,0.25]
-    # R_rate_diag: [0.1, 0.1, 0.1, 0.05, 0.05, 0.05]  # Penalty on rate of change of control inputs
+    # PID + augmented delayed input MPC without absolute input penalty 
+    # Kp_pos: [1.0, 0.5, 0.7, 1.1, 1.31, 1.5]
+    # Ki_pos: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
+    # Kd_pos: [0.01, 0.015, 0.03, 0.015, 0.0, 0.0]
+    # integral_limit: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]        # Integral windup limits for each DOF
+    # mpc_algorithm: 'aug_delayed_input'
+    # include_abs_input: False                                # Whether to include absolute control input penalty in the cost function (only used for augment MPC)
+    # R_abs_diag: [1.0,1.0,1.0,1.0,1.0,1.0]                   # Penalty on absolute control input 
+    # N_horizon: 20
+    # Q_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]                  # State error penalty weights
+    # R_rate_diag: [1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0]    # Penalty on control input rate of change
+    # max_vel: [1.0, 1.0, 0.5, 0.25, 0.25, 0.5]             # Max velocity limits for each DOF
+    # max_tau: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]   # Max control input limits for each DOF
+    # max_delta_tau: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]  # Max change in control input per time step
+
+    # PID + augmented output error input MPC
+    # Kp_pos: [1.0, 0.5, 0.7, 1.1, 1.31, 1.5]
+    # Ki_pos: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
+    # Kd_pos: [0.01, 0.015, 0.03, 0.015, 0.0, 0.0]
+    # integral_limit: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]        # Integral windup limits for each DOF
+    # mpc_algorithm: 'aug_error_output'
+    # N_horizon: 20
+    # Q_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]                    # State error penalty weights
+    # include_abs_input: False                               # Whether to include absolute control input penalty in the cost function (only used for augment MPC)
+    # R_abs_diag: [1.0,1.0,1.0,1.0,1.0,1.0]                 # Penalty on absolute control input 
+    # R_rate_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]    # Penalty on control input rate of change
+    # max_vel: [1.0, 1.0, 0.5, 0.25, 0.25, 0.5]             # Max velocity limits for each DOF
+    # max_tau: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]   # Max control input limits for each DOF
+    # max_delta_tau: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]  # Max change in control input per time step
+
+    # =============================================== eDMDc gains for different MPC formulations ===============================================
+    # model_name: 'edmdc'
+    # version: 'v1'  # Version of the model to use (e.g., 'v1', 'v2', etc.)
+    
+    # PID + standard MPC gains
+    # Kp_pos: [1.2, 0.5, 1.0, 1.1, 1.31, 1.5]
+    # Ki_pos: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
+    # Kd_pos: [0.01, 0.015, 0.03, 0.015, 0.0, 0.0]
+    # integral_limit: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]        # Integral windup limits for each DOF
+    # mpc_algorithm: 'standard'
+    # N_horizon: 20
+    # Q_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]               # State error penalty weights
+    # R_abs_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]             # Penalty on absolute control input 
+    # max_vel: [1.0, 1.0, 0.5, 0.25, 0.25, 0.5]             # Max velocity limits for each DOF
+    # max_tau: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]   # Max control input limits for each DOF
+
+    # PID + augmented delayed input MPC with absolute input penalty
+    # Kp_pos: [1.0, 0.5, 0.7, 1.1, 1.31, 1.5]
+    # Ki_pos: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
+    # Kd_pos: [0.01, 0.015, 0.03, 0.015, 0.0, 0.0]
+    # integral_limit: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]        # Integral windup limits for each DOF
+    # mpc_algorithm: 'aug_delayed_input'
+    # include_abs_input: True  
+    # N_horizon: 10
+    # Q_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]                # State error penalty weights
+    # R_abs_diag: [1.0,1.0,1.0,1.0,1.0,1.0]                 # Penalty on absolute control input 
+    # R_rate_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]           # Penalty on control input rate of change
+    # max_vel: [1.0, 1.0, 0.5, 0.25, 0.25, 0.5]             # Max velocity limits for each DOF
+    # max_tau: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]   # Max control input limits for each DOF
+    # max_delta_tau: [20.0, 20.0, 20.0, 20.0, 20.0, 20.0]   # Max change in control input per time step
+
+    # PID + augmented delayed input MPC without absolute input penalty
+    # Kp_pos: [1.0, 0.5, 0.7, 1.1, 1.31, 1.5]
+    # Ki_pos: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
+    # Kd_pos: [0.01, 0.015, 0.03, 0.015, 0.0, 0.0]
+    # integral_limit: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]          # Integral windup limits for each DOF
+    # mpc_algorithm: 'aug_delayed_input'
+    # include_abs_input: False                                # Whether to include absolute control input penalty in the cost function (only used for augment MPC)
+    # R_abs_diag: [1.0,1.0,1.0,1.0,1.0,1.0]                   # Penalty on absolute control input 
+    # N_horizon: 20
+    # Q_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]                  # State error penalty weights
+    # R_rate_diag: [1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0]    # Penalty on control input rate of change
+    # max_vel: [1.0, 1.0, 0.5, 0.25, 0.25, 0.5]             # Max velocity limits for each DOF
+    # max_tau: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]   # Max control input limits for each DOF
+    # max_delta_tau: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]  # Max change in control input per time step
+
+    # PID + augmented output error input MPC
+    # mpc_algorithm: 'aug_error_output'
+    # N_horizon: 20
+    # Q_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]                    # State error penalty weights
+    # include_abs_input: False                               # Whether to include absolute control input penalty in the cost function (only used for augment MPC)
+    # R_abs_diag: [1.0,1.0,1.0,1.0,1.0,1.0]                 # Penalty on absolute control input 
+    # R_rate_diag: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]    # Penalty on control input rate of change
+    # max_vel: [1.0, 1.0, 0.5, 0.25, 0.25, 0.5]             # Max velocity limits for each DOF
+    # max_tau: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]   # Max control input limits for each DOF
+    # max_delta_tau: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]  # Max change in control input per time step
+
