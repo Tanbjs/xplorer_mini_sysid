@@ -48,7 +48,7 @@ namespace OceanEnvironment
         Eigen::Matrix<double, 6, 1> nu_c_sim = step_nu();
         
         // ----Calculate relative velocity simulation (BODY-FRAME IN NED) ----
-        Eigen::Matrix<double, 6, 1> nu_r_sim = vector6_to_ned(nu) - (eulerang(eta.tail(3)).inverse() * nu_c_sim);
+        Eigen::Matrix<double, 6, 1> nu_r_sim = vector6_to_ned(nu) - (eulerang(vector6_to_ned(eta).tail(3)).inverse() * nu_c_sim);
 
         // ---- Calculate Dynamic ----
         // Coriolis Matrix
@@ -66,6 +66,12 @@ namespace OceanEnvironment
         Eigen::Matrix<double, 6, 1> tau_c_enu = Eigen::VectorXd::Zero(6);
         tau_c_ned = ((c_rb_nu + c_a_nu) * nu - (c_rb_nu_r + c_a_nu_r) * nu_r_sim) + ((d_nu * nu) - (d_nu_r * nu_r_sim));
         tau_c_enu = vector6_to_ned(tau_c_ned);
+
+        double torque_scaling = 0.05;
+        tau_c_enu(2) *= 0.1;
+        tau_c_enu(2) *= 0.1; // Heaves
+        tau_c_enu(4) *= torque_scaling; // Pitch
+        tau_c_enu(5) *= torque_scaling; // Yaw
         
         return tau_c_enu;
     }
