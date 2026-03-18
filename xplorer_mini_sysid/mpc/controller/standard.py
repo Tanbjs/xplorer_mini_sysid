@@ -8,9 +8,9 @@ from control import dlqr
 from acados_template import AcadosOcp, AcadosOcpSolver, AcadosOcpDims, AcadosModel, AcadosOcpConstraints, AcadosOcpCost
 from kmc.utils.model_wrapper import DMDcWrapper, EDMDcWrapper, DeepModelWrapper
 
-from ..base import KMPC, MPCParams
+from ..base import KMC, MPCParams
 
-class Standard(KMPC):
+class Standard(KMC):
     def __init__(self, 
                  model_wrapper : DMDcWrapper | EDMDcWrapper | DeepModelWrapper,
                  mpc_params: MPCParams,
@@ -101,7 +101,7 @@ class Standard(KMPC):
 
         # Terminal Cost: z^T * P * z
         P = self._dare_solution()
-        cost.Vx_e = np.eye(nz) # ต้องเป็น Identity เพื่อแมป z ไปยัง W_e (P)
+        cost.Vx_e = np.eye(nz) 
         cost.W_e = P
         cost.yref_e = np.zeros(nz)
         
@@ -119,7 +119,7 @@ class Standard(KMPC):
 
         # Path bounds (Output constraints)
         v_max_sc = self.model.scaler_y.transform(np.array(self.mpc_params.bounds.y_max).reshape(1, -1)).flatten()
-        constraints.C = self.model.dyn.C  # ใช้แค่ (ny x nz)
+        constraints.C = self.model.dyn.C 
         constraints.D = np.zeros((ny, nu))
         constraints.lg, constraints.ug = -v_max_sc, v_max_sc
         
@@ -184,7 +184,9 @@ class Standard(KMPC):
             self._solver.set(i, "yref", yref_augmented)
         
         # Terminal reference 
-        self._solver.set(self.mpc_params.N_horizon, "yref", np.zeros_like(z_scaled.flatten()))
+        y_ref_N = np.zeros_like(z_scaled.flatten()) # Terminal reference is zero in lifted space (z -> 0)
+        # y_ref_N = y_ref_scaled.flatten() # Terminal reference in output space (Cz -> y_ref)
+        self._solver.set(self.mpc_params.N_horizon, "yref", y_ref_N)
 
         status = self._solver.solve()
         if status != 0:

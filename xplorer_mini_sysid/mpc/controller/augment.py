@@ -12,13 +12,15 @@ from acados_template import (
     AcadosOcpSolver,
 )
 from casadi import DM, SX
+import scipy.linalg as la
+import control as ct
 from control import ctrb, dlqr
 from kmc.utils.model_wrapper import DeepModelWrapper, DMDcWrapper, EDMDcWrapper
 
-from ..base import KMPC, LinearModel, MPCParams
+from ..base import KMC, LinearModel, MPCParams
 
 
-class AugmentDelayedInputForm(KMPC):
+class AugmentDelayedInputForm(KMC):
     def __init__(self, 
                  model_wrapper : DMDcWrapper | EDMDcWrapper | DeepModelWrapper,
                  mpc_params: MPCParams,
@@ -56,43 +58,63 @@ class AugmentDelayedInputForm(KMPC):
             R_aug = self.mpc_params.weights.R_abs + self.mpc_params.weights.R_rate
             S_aug = np.vstack([np.zeros((nz, nu)), self.mpc_params.weights.R_abs])
         else:
-            Q_aug = scipy.linalg.block_diag(np.zeros((nz, nz)), self.mpc_params.weights.Q)
+            Q_aug = self._aug_model.C.T @ self.mpc_params.weights.Q @ self._aug_model.C
             R_aug = self.mpc_params.weights.R_rate
             S_aug = None
-
-        # --- Tikhonov Regularization ---
-        Q_aug += np.eye(Q_aug.shape[0]) * 1e-8 
 
         if S_aug is not None:
             _, P, _ = dlqr(self._aug_model.A, self._aug_model.B, Q_aug, R_aug, S_aug)
         else:
             _, P, _ = dlqr(self._aug_model.A, self._aug_model.B, Q_aug, R_aug)
         
-        # Symmetrize P to mitigate numerical issues
-        P = (P + P.T) / 2.0 
-
         # check if P is positive definite
         min_eig = np.min(np.real(np.linalg.eigvals(P)))
         if min_eig > -1e-10:
             self._logger.info(f"DARE solution P is stable (min eig: {min_eig:.2e})")
         else:
-            self._logger.warning(f"DARE solution P has significant negative eigenvalue: {min_eig:.2e}")
+            self._logger.info(f"DARE solution P has significant negative eigenvalue: {min_eig:.2e}")
 
         return P
     
     def __augment_dynamics(self):
-        # x_aug = [z_k; u_{k-1}]
-        # x_aug_{k+1} = A*x_aug_k + B*delta_u_k 
-        # u_k     = u_{k-1} + delta_u_k        
+
+        self.model.dyn.B = self.model.dyn.B  # check direction of control input
         A = np.block([[self.model.dyn.A, self.model.dyn.B], 
                     [np.zeros((self.model.dyn.B.shape[1], self.model.dyn.A.shape[0])), np.eye(self.model.dyn.B.shape[1])]])
-        B = np.block([[self.model.dyn.B], [np.eye(self.model.dyn.B.shape[1])]])
+        B = np.block([[self.model.dyn.B], 
+                      [np.eye(self.model.dyn.B.shape[1])]])
         C = np.block([self.model.dyn.C, np.zeros((self.model.dyn.C.shape[0], self.model.dyn.B.shape[1]))])
 
-        # check controllability of augmented system
-        ctrb_matrix = ctrb(A, B)
-        if np.linalg.matrix_rank(ctrb_matrix) < A.shape[0]:
-            self._logger.warning(f"Augmented system is not controllable! Rank: {np.linalg.matrix_rank(ctrb_matrix)}, Required: {A.shape[0]}")
+        # 1. Stability Check (Poles)
+        poles = np.linalg.eigvals(A)
+        max_pole = np.max(np.abs(poles))
+        self._logger.info(f"A_aug Max Pole: {max_pole:.4f}")
+
+        # 2. Stabilizability Check (PBH Test)
+        vals, vecs = la.eig(A, left=True, right=False)
+        unstable_indices = np.where(np.abs(vals) > 1.0001)[0]
+        
+        is_stabilizable = True
+        if len(unstable_indices) > 0:
+            for idx in unstable_indices:
+                # w^H * B must not be 0 for unstable modes
+                mode_gain = np.linalg.norm(vecs[:, idx].conj().T @ B)
+                if mode_gain < 1e-7:
+                    self._logger.error(f"UNSTABILIZABLE mode found at {vals[idx]:.4f} (Gain: {mode_gain:.2e})")
+                    is_stabilizable = False
+            if is_stabilizable:
+                self._logger.info(f"System is STABILIZABLE ({len(unstable_indices)} unstable modes under control)")
+        else:
+            self._logger.info("System is Asymptotically Stable (No unstable modes)")
+
+        # Controllability Check
+        Wc = ct.ctrb(A, B)
+        rank = np.linalg.matrix_rank(Wc, tol=1e-7)
+        n_states = A.shape[0]
+        if rank < n_states:
+            self._logger.warning(f"Augmented system not fully controllable (Rank {rank}/{n_states})")
+
+        self._logger.info(f"A_aug Norm: {np.linalg.norm(A):.2e}, B_aug Norm: {np.linalg.norm(B):.2e}")
 
         return LinearModel(A=A, B=B, C=C)
     
@@ -171,6 +193,7 @@ class AugmentDelayedInputForm(KMPC):
             
             cost.Vx_e = np.eye(nx_aug)
             cost.W_e = P
+            # cost.W_e = np.zeros((nx_aug, nx_aug))
 
             # Allocate yref vectors
             cost.yref = np.zeros(ny + nu + nu)   
@@ -194,13 +217,13 @@ class AugmentDelayedInputForm(KMPC):
             cost.W = W
 
             # Terminal Cost P 
-            Q_aug = scipy.linalg.block_diag(self.model.dyn.C.T @ self.mpc_params.weights.Q @ self.model.dyn.C, 
-                                            np.zeros((nu, nu)))
+            Q_aug = self._aug_model.C.T @ self.mpc_params.weights.Q @ self._aug_model.C
             R_aug = self.mpc_params.weights.R_rate 
             _, P, _ = dlqr(self._aug_model.A, self._aug_model.B, Q_aug, R_aug)
             
             cost.Vx_e = np.eye(nx_aug)
-            cost.W_e = P
+            # cost.W_e = P
+            cost.W_e = np.zeros((nx_aug, nx_aug))
 
             # Allocate yref vectors
             cost.yref = np.zeros(ny + nu)   
@@ -236,6 +259,17 @@ class AugmentDelayedInputForm(KMPC):
 
         constraints.lg = np.concatenate([-v_max_sc, -tau_max_sc])
         constraints.ug = np.concatenate([v_max_sc, tau_max_sc])
+
+        # constraints.C = np.block([
+        #     [self.model.dyn.C, np.zeros((ny, nu))]
+        # ])
+
+        # constraints.D = np.block([
+        #     [np.zeros((ny, nu))]
+        # ])
+
+        # constraints.lg = -v_max_sc
+        # constraints.ug = v_max_sc
         
         # initial condition constraints
         constraints.idxbx_0 = np.arange(nx_aug)
@@ -262,8 +296,7 @@ class AugmentDelayedInputForm(KMPC):
         ocp.solver_options.tf = self.mpc_params.N_horizon * self.mpc_params.dt
         ocp.solver_options.integrator_type = 'DISCRETE'
         ocp.solver_options.nlp_solver_type = 'SQP_RTI'
-        ocp.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
-        ocp.solver_options.qp_solver_cond_N = 5 
+        ocp.solver_options.qp_solver = 'FULL_CONDENSING_HPIPM'
         ocp.solver_options.print_level = 0
         ocp.solver_options.tol = 1e-4 
         
@@ -284,7 +317,8 @@ class AugmentDelayedInputForm(KMPC):
 
             for i in range(self.mpc_params.N_horizon):
                 self._solver.cost_set(i, "W", W)
-            self._solver.cost_set(self.mpc_params.N_horizon, "W", P)
+            # self._solver.cost_set(self.mpc_params.N_horizon, "W", P)
+            self._solver.cost_set(self.mpc_params.N_horizon, "W", np.zeros_like(P))     # Terminal cost is effectively disabled since we are using a target selector formulation
 
             self._logger.info("MPC parameters updated. Recomputed cost matrices based on new parameters.")
 
@@ -329,11 +363,12 @@ class AugmentDelayedInputForm(KMPC):
         status = self._solver.solve()
         delta_u_scaled = self._solver.get(0, "u")
         self._u_prev_scaled += delta_u_scaled
+        u_final = self.model.scaler_u.inverse_transform(self._u_prev_scaled.reshape(1, -1)).flatten()
 
-        return self.model.scaler_u.inverse_transform(self._u_prev_scaled.reshape(1, -1)).flatten()
+        return  -1.0 * u_final
     
 
-class AugmentErrorOutputForm(KMPC):
+class AugmentErrorOutputForm(KMC):
     def __init__(self, 
                  model_wrapper : DMDcWrapper | EDMDcWrapper | DeepModelWrapper,
                  mpc_params: MPCParams,
@@ -509,8 +544,8 @@ class AugmentErrorOutputForm(KMPC):
             # Terminal Cost P 
             P = self._dare_solution()
             cost.Vx_e = np.eye(nx_aug)
-            # cost.W_e = P
-            cost.W_e = np.zeros((nx_aug, nx_aug))
+            cost.W_e = P
+            # cost.W_e = np.zeros((nx_aug, nx_aug))
 
             # Allocate yref vectors
             cost.yref = np.zeros(ny + nu)   
@@ -564,8 +599,7 @@ class AugmentErrorOutputForm(KMPC):
         ocp.solver_options.tf = self.mpc_params.N_horizon * self.mpc_params.dt
         ocp.solver_options.integrator_type = 'DISCRETE'
         ocp.solver_options.nlp_solver_type = 'SQP_RTI'
-        ocp.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
-        ocp.solver_options.qp_solver_cond_N = 5 
+        ocp.solver_options.qp_solver = 'FULL_CONDENSING_HPIPM'
         ocp.solver_options.print_level = 0
         ocp.solver_options.tol = 1e-4 
         
@@ -634,8 +668,7 @@ class AugmentErrorOutputForm(KMPC):
         self._solver.set(0, "ubx", x0_t)
         for i in range(self.mpc_params.N_horizon):
             self._solver.set(i, "yref", yref_vec)
-        # self._solver.set(self.mpc_params.N_horizon, "yref", np.zeros_like(x0_t))
-        self._solver.cost_set(self.mpc_params.N_horizon, "W", np.zeros((self._aug_model.A.shape[0], self._aug_model.A.shape[0])))
+        self._solver.set(self.mpc_params.N_horizon, "yref", np.zeros_like(x0_t))
 
         # Solve MPC problem
         status = self._solver.solve()
