@@ -85,7 +85,7 @@ class KoopmanModel:
     scaler_y: Optional[object] = None
 
 
-class KMPC(ABC):
+class KMC(ABC):
 
     mpc_params: MPCParams
     model: KoopmanModel
@@ -129,22 +129,6 @@ class KMPC(ABC):
                 setattr(self.mpc_params.bounds, key, value)
             else:
                 raise ValueError(f"Invalid parameter name: {key}")
-
-    @abstractmethod
-    def _setup_acados_model(self) -> AcadosModel:
-        raise NotImplementedError("Subclasses must implement __setup_acados_model method.")
-
-    @abstractmethod
-    def _setup_acados_cost(self):
-        raise NotImplementedError("Subclasses must implement __setup_acados_cost method.")
-
-    @abstractmethod
-    def _setup_acados_constraints(self):
-        raise NotImplementedError("Subclasses must implement __setup_acados_constraints method.")
-
-    @abstractmethod
-    def _setup_acados_solver(self) -> AcadosOcpSolver:
-        raise NotImplementedError("Subclasses must implement __setup_acados_solver method.")
 
     @abstractmethod
     def compute_control(self) -> np.ndarray:
