@@ -43,7 +43,7 @@ class KMMonitor(Node):
         # --- Models Initialization (Load latest from Registry) ---
         self.dmdc_model = self.init_model("dmdc")
         self.edmdc_model = self.init_model("edmdc")
-        self.nn_model = self.init_model("deep vanilla")
+        # self.nn_model = self.init_model("deep vanilla")
 
         # --- Publishers (One-step prediction output) ---
         self.pub_dmdc = self.create_publisher(TwistStamped, "gnc/sysid/dmdc/one_step", 10)
@@ -133,11 +133,11 @@ class KMMonitor(Node):
             self.publish_twist(self.pub_edmdc_err, self.tmp_edmdc_nu - nu)  # Publish error for EDMDc
             self.tmp_edmdc_nu = y_next # store x{k+1} to publish in next iteration (one-step delay)
 
-        if self.nn_model:
-            x_next, y_next = self.nn_model.predict(context=None, model_input={'x': nu, 'u': u})
-            self.publish_twist(self.pub_nn, self.tmp_nn_nu)
-            self.publish_twist(self.pub_nn_err, self.tmp_nn_nu - nu)  # Publish error for NN
-            self.tmp_nn_nu = y_next # store x{k+1} to publish in next iteration (one-step delay)
+        # if self.nn_model:
+        #     x_next, y_next = self.nn_model.predict(context=None, model_input={'x': nu, 'u': u})
+        #     self.publish_twist(self.pub_nn, self.tmp_nn_nu)
+        #     self.publish_twist(self.pub_nn_err, self.tmp_nn_nu - nu)  # Publish error for NN
+        #     self.tmp_nn_nu = y_next # store x{k+1} to publish in next iteration (one-step delay)
 
     def publish_twist(self, pub, data):
         """Helper to publish numpy array as TwistStamped message."""
