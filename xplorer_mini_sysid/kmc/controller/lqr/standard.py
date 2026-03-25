@@ -48,7 +48,7 @@ class Standard(KLQR):
     def compute_control(self, x, y_ref, y_cmd=None):
         x_scaled = self.model.scaler_x.transform(x.reshape(1, -1)).flatten() if self.model.scaler_x else x
         y_ref_scaled = self.model.scaler_y.transform(y_ref.reshape(1, -1)).flatten() if self.model.scaler_y else y_ref
-        z = self.model.lift(x_scaled)
+        z_scaled = self.model.lift(x_scaled)
         # u_scaled = -self.K @ (z - self.model.dyn.C.T @ y_ref_scaled) # wrong - should be function of s_{k+1}
-        u_scaled = -self.K @ z + y_cmd
+        u_scaled = -self.K @ z_scaled
         return self.model.scaler_u.inverse_transform(u_scaled.reshape(1, -1)).flatten()
