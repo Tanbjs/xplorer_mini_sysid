@@ -19,7 +19,7 @@ def generate_launch_description():
         'config',
         'kmpc_config.yaml'
     )
-
+    
     control_node = Node(
         package='xplorer_mini_sysid',
         executable='kmpc.py',
