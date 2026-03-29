@@ -28,7 +28,7 @@ class BaseKMC(ABC):
         if isinstance(model_wrapper, DMDcWrapper):
             lift_func = lambda x: x 
         elif isinstance(model_wrapper, EDMDcWrapper):
-            lift_func = lambda x: model_wrapper.model._obs_func.transform(x).reshape(1,-1)
+            lift_func = lambda x: model_wrapper.model._obs_func.transform(x)
         elif isinstance(model_wrapper, DeepModelWrapper):
             lift_func = lambda x: model_wrapper.model.model.lift(x).detach().cpu().numpy()
         else:
