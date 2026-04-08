@@ -1,0 +1,6 @@
+/**: # This will put all the parameters in every node
+  ros__parameters:
+    uuv_name: 'xplorer_mini'
+
+    dmdc_version: 1
+    edmdc_version: 1
