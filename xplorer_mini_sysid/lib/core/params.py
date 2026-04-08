@@ -33,6 +33,8 @@ class Bounds:
         u_max: Maximum control input values (optional)
         du_min: Minimum control input rate values (optional)
         du_max: Maximum control input rate values (optional)
+        terminal_bound_min: Minimum terminal state values (optional)
+        terminal_bound_max: Maximum terminal state values (optional)
     """
     x_min: Optional[np.ndarray] = None
     x_max: Optional[np.ndarray] = None
@@ -42,3 +44,5 @@ class Bounds:
     u_max: Optional[np.ndarray] = None
     du_min: Optional[np.ndarray] = None
     du_max: Optional[np.ndarray] = None
+    terminal_bound_min: Optional[np.ndarray] = None
+    terminal_bound_max: Optional[np.ndarray] = None
