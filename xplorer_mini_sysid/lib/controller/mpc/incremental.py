@@ -21,33 +21,6 @@ from .base import KMPC, MPCParams
 from ...core.model import LinearModel
 
 
-class Incremental:
-    """
-    Incremental MPC formulation with state cost and input cost. 
-    State is the lifted state z, and the cost penalizes deviation of z from a reference trajectory (lifted from y_ref) and control effort.
-    """
-    def __init__(self, 
-                 mode: str,
-                 **kwargs):
-        
-        if mode == 'state_form':
-            self.controller = IncrementalStateForm(**kwargs)
-        elif mode == 'output_form':
-            self.controller = IncrementalOutputForm(**kwargs)
-        else:
-            raise ValueError(f"Unsupported mode: {mode}. Choose 'state_form' or 'output_form'.")
-
-    @property
-    def mpc_params(self):
-        return self.controller.mpc_params
-
-    def set_params(self, **kwargs):
-        self.controller.set_params(**kwargs)
-
-    def compute_control(self, x, y_ref):
-        return self.controller.compute_control(x, y_ref)
-    
-
 class IncrementalStateForm(KMPC):
     def __init__(self, 
                  model_wrapper : DMDcWrapper | EDMDcWrapper | DeepModelWrapper,
@@ -220,7 +193,7 @@ class IncrementalStateForm(KMPC):
             
             cost.Vx_e = np.eye(nx_aug)
             cost.W_e = P
-            # cost.W_e = np.zeros((nx_aug, nx_aug))
+            # cost.W_e = np.zeros((nx_aug, nx_aug))     # Debug
 
             # Allocate yref vectors
             cost.yref = np.zeros(ny + nu + nu)   
@@ -249,8 +222,8 @@ class IncrementalStateForm(KMPC):
             _, P, _ = dlqr(self._aug_model.A, self._aug_model.B, Q_aug, R_aug)
             
             cost.Vx_e = np.eye(nx_aug)
-            # cost.W_e = P
-            cost.W_e = np.zeros((nx_aug, nx_aug))
+            cost.W_e = P
+            # cost.W_e = np.zeros((nx_aug, nx_aug))     # Debug
 
             # Allocate yref vectors
             cost.yref = np.zeros(ny + nu)   
@@ -274,29 +247,29 @@ class IncrementalStateForm(KMPC):
         constraints.ubu = delta_tau_max_sc
         constraints.idxbu = np.arange(nu)
 
-        constraints.C = np.block([
-            [self.model.dyn.C, np.zeros((ny, nu))], # Extract y_k
-            [np.zeros((nu, nz)), np.eye(nu)]        # Extract u_{k-1}
-        ])
-
-        constraints.D = np.block([
-            [np.zeros((ny, nu))],
-            [np.eye(nu)]
-        ])
-
-        constraints.lg = np.concatenate([-v_max_sc, -tau_max_sc])
-        constraints.ug = np.concatenate([v_max_sc, tau_max_sc])
-
         # constraints.C = np.block([
-        #     [self.model.dyn.C, np.zeros((ny, nu))]
+        #     [self.model.dyn.C, np.zeros((ny, nu))], # Extract y_k
+        #     [np.zeros((nu, nz)), np.eye(nu)]        # Extract u_{k-1}
         # ])
 
         # constraints.D = np.block([
-        #     [np.zeros((ny, nu))]
+        #     [np.zeros((ny, nu))],
+        #     [np.eye(nu)]
         # ])
 
-        # constraints.lg = -v_max_sc
-        # constraints.ug = v_max_sc
+        # constraints.lg = np.concatenate([-v_max_sc, -tau_max_sc])
+        # constraints.ug = np.concatenate([v_max_sc, tau_max_sc])
+
+        constraints.C = np.block([
+            [self.model.dyn.C, np.zeros((ny, nu))]
+        ])
+
+        constraints.D = np.block([
+            [np.zeros((ny, nu))]
+        ])
+
+        constraints.lg = -v_max_sc
+        constraints.ug = v_max_sc
         
         # initial condition constraints
         constraints.idxbx_0 = np.arange(nx_aug)
@@ -323,7 +296,8 @@ class IncrementalStateForm(KMPC):
         ocp.solver_options.tf = self.mpc_params.N_horizon * self.mpc_params.dt
         ocp.solver_options.integrator_type = 'DISCRETE'
         ocp.solver_options.nlp_solver_type = 'SQP_RTI'
-        ocp.solver_options.qp_solver = 'FULL_CONDENSING_HPIPM'
+        ocp.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
+        ocp.solver_options.qp_solver_cond_N = 5 
         ocp.solver_options.print_level = 0
         ocp.solver_options.tol = 1e-4 
         
@@ -344,8 +318,8 @@ class IncrementalStateForm(KMPC):
 
             for i in range(self.mpc_params.N_horizon):
                 self._solver.cost_set(i, "W", W)
-            # self._solver.cost_set(self.mpc_params.N_horizon, "W", P)
-            self._solver.cost_set(self.mpc_params.N_horizon, "W", np.zeros_like(P))     # Terminal cost is effectively disabled since we are using a target selector formulation
+            self._solver.cost_set(self.mpc_params.N_horizon, "W", P)
+            # self._solver.cost_set(self.mpc_params.N_horizon, "W", np.zeros_like(P))     # Terminal cost is effectively disabled since we are using a target selector formulation
 
             self._logger.info("MPC parameters updated. Recomputed cost matrices based on new parameters.")
 
@@ -364,35 +338,45 @@ class IncrementalStateForm(KMPC):
         self.__post_set_params_update()
 
     def compute_control(self, x, y_ref):
-
+        # 1. Scale and Lift current state
         x_scaled = self.model.scaler_x.transform(x.reshape(1, -1)).flatten()
-        z_scaled = self.model.lift(x_scaled)
-        y_ref_scaled = self.model.scaler_y.transform(y_ref.reshape(1, -1)).flatten()
+        z_k = self.model.lift(x_scaled)
+        x0_aug = np.concatenate([z_k, self._u_prev_scaled])
 
-        if self._include_absolute_input:
-            yref_vec = np.concatenate([y_ref_scaled, np.zeros_like(self._u_prev_scaled), np.zeros_like(self._u_prev_scaled)])   # [y_k, u_{k-1}, du_k]
-        else: 
-            yref_vec = np.concatenate([y_ref_scaled, np.zeros_like(self._u_prev_scaled)])   # [y_k, delta_u_k]
+        # 2. Prepare Reference (Tracking y_ref -> z_ref)
+        y_ref = np.array(y_ref)
+        if y_ref.ndim == 1:
+            y_ref_seq = np.tile(y_ref, (self.mpc_params.N_horizon, 1))
+        else:
+            y_ref_seq = y_ref[:self.mpc_params.N_horizon]
+        
+        y_ref_scaled = self.model.scaler_y.transform(y_ref_seq)
+        # Convert output ref to state ref (z_ref)
+        # Note: Depending on your model, you might need a target selector 
+        # or assume z_ref is the lifted version of y_ref_scaled
+        z_ref_seq = self.model.lift(y_ref_scaled) 
 
-        # Compute x0 and steady-state target for terminal cost
-        x0_t = np.concatenate([z_scaled, self._u_prev_scaled])
-        x_aug_ss_scaled = np.zeros_like(x0_t)
-        # x_aug_ss_scaled = self._target_inv @ np.concatenate([np.zeros_like(x0_t), y_ref_scaled])
-        # self._logger.info(f"SS Target Magnitude: {np.linalg.norm(x_aug_ss_scaled)}")
-        # Set values for solver
-        self._solver.set(0, "lbx", x0_t)
-        self._solver.set(0, "ubx", x0_t)        
+        # 3. Set Initial Condition
+        self._solver.set(0, "lbx", x0_aug)
+        self._solver.set(0, "ubx", x0_aug)        
+
+        # 4. Set Stage References: [z_ref, du_ref=0]
+        nu = self.model.dyn.B.shape[1]
         for i in range(self.mpc_params.N_horizon):
-            self._solver.set(i, "yref", yref_vec)
-        self._solver.set(self.mpc_params.N_horizon, "yref", x_aug_ss_scaled[:self._aug_model.A.shape[0]])  # Terminal cost on full augmented state
+            yref_stage = np.concatenate([z_ref_seq[i], np.zeros(nu)])
+            self._solver.set(i, "yref", yref_stage)
+        
+        # 5. Set Terminal Reference
+        self._solver.set(self.mpc_params.N_horizon, "yref", np.concatenate([np.zeros_like(z_ref_seq[-1]), self._u_prev_scaled]))
 
-        # Solve MPC problem
+        # 6. Solve and Update
         status = self._solver.solve()
-        delta_u_scaled = self._solver.get(0, "u")
-        self._u_prev_scaled += delta_u_scaled
-        u_final = self.model.scaler_u.inverse_transform(self._u_prev_scaled.reshape(1, -1)).flatten()
-
-        return  u_final
+        if status != 0: self._logger.warning(f"Solver failed: {status}")
+        
+        du_0 = self._solver.get(0, "u")
+        self._u_prev_scaled += du_0
+        
+        return self.model.scaler_u.inverse_transform(self._u_prev_scaled.reshape(1, -1)).flatten()
     
 
 class IncrementalOutputForm(KMPC):

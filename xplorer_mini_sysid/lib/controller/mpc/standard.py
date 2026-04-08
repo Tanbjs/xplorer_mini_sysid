@@ -11,33 +11,6 @@ from kmc.utils.model_wrapper import DMDcWrapper, EDMDcWrapper, DeepModelWrapper
 from .base import KMPC, MPCParams
 
 
-class Standard:
-    """
-    Standard MPC formulation with state cost and input cost. 
-    State is the lifted state z, and the cost penalizes deviation of z from a reference trajectory (lifted from y_ref) and control effort.
-    """
-    def __init__(self, 
-                 mode: str,
-                 **kwargs):
-        
-        if mode == 'state_form':
-            self.controller = StandardStateForm(**kwargs)
-        elif mode == 'output_form':
-            self.controller = StandardOutputForm(**kwargs)
-        else:
-            raise ValueError(f"Unsupported mode: {mode}. Choose 'state_form' or 'output_form'.")
-
-    @property
-    def params(self):
-        return self.controller.mpc_params
-    
-    def set_params(self, **kwargs):
-        self.controller.set_params(**kwargs)
-
-    def compute_control(self, x, y_ref):
-        return self.controller.compute_control(x, y_ref)
-
-
 class StandardStateForm(KMPC):
     def __init__(self, 
                  model_wrapper : DMDcWrapper | EDMDcWrapper | DeepModelWrapper,
@@ -61,6 +34,10 @@ class StandardStateForm(KMPC):
         self._constraints = self._setup_acados_constraints()
         self._solver = self._setup_acados_solver()
 
+    @property
+    def params(self) -> MPCParams:
+        return self.mpc_params
+    
     def _dare_solution(self): 
         Qz = self.model.dyn.C.T @ self.mpc_params.weights.Q @ self.model.dyn.C
         Rz = self.mpc_params.weights.R_abs
@@ -142,13 +119,17 @@ class StandardStateForm(KMPC):
 
         # Path bounds (Output constraints)
         v_max_sc = self.model.scaler_y.transform(np.array(self.mpc_params.bounds.y_max).reshape(1, -1)).flatten()
+        v_min_sc = self.model.scaler_y.transform(np.array(self.mpc_params.bounds.y_min).reshape(1, -1)).flatten()
         constraints.C = self.model.dyn.C 
         constraints.D = np.zeros((ny, nu))
-        constraints.lg, constraints.ug = -v_max_sc, v_max_sc
+        constraints.lg, constraints.ug = v_min_sc, v_max_sc
         
         # Initial condition
         constraints.idxbx_0 = np.arange(nz)
         constraints.lbx_0 = constraints.ubx_0 = np.zeros(nz)
+        # constraints.idxbx_e = np.arange(nz)
+        # constraints.lbx_e = np.zeros(nz)
+        # constraints.ubx_e = np.zeros(nz)
 
         return constraints
     
@@ -198,6 +179,7 @@ class StandardStateForm(KMPC):
         y_ref = np.array(y_ref)
         
         if self._use_preview:
+            if y_ref.ndim == 1: raise ValueError("Expected y_ref to have shape (N_horizon, ny) when use_preview is True.")
             y_ref_scaled = self.model.scaler_y.transform(y_ref) if self.model.scaler_y else y_ref
         else: 
             y_ref = np.tile(y_ref, (self.mpc_params.N_horizon, 1)) if y_ref.ndim == 1 else y_ref[:self.mpc_params.N_horizon]
@@ -217,6 +199,8 @@ class StandardStateForm(KMPC):
             yref_augmented = np.concatenate([z_ref_scaled[i].flatten(), zeros_u])
             self._solver.set(i, "yref", yref_augmented)
         
+        # self._solver.set(self.mpc_params.N_horizon, "lbx",  z_ref_scaled[-1].flatten() - self.mpc_params.bounds.terminal_bound_min)
+        # self._solver.set(self.mpc_params.N_horizon, "ubx",  z_ref_scaled[-1].flatten() + self.mpc_params.bounds.terminal_bound_max)
         self._solver.set(self.mpc_params.N_horizon, "yref", z_ref_scaled[-1].flatten())
 
         status = self._solver.solve()
