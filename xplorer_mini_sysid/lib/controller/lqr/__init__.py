@@ -1,7 +1,8 @@
 from .base import LQRParams
-from .standard import Standard
+from .standard import StandardStateForm, StandardOutputForm
 
 __all__ = [
-            'Standard',
+            'StandardStateForm',
+            'StandardOutputForm',
             'LQRParams'
         ]
