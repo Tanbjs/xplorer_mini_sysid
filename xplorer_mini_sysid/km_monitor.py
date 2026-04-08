@@ -20,7 +20,7 @@ from geometry_msgs.msg import TwistStamped, WrenchStamped
 
 class KMMonitor(Node):
     def __init__(self):
-        super().__init__('km_monitor')
+        super().__init__('km_monitor', automatically_declare_parameters_from_overrides=True)
         self.get_logger().info("KM One-step Monitor Node started.")
 
         # --- MLflow Configuration ---
@@ -41,8 +41,8 @@ class KMMonitor(Node):
         self.u_true = np.zeros(6)   # Current control input (wrench)
 
         # --- Models Initialization (Load latest from Registry) ---
-        self.dmdc_model = self.init_model("dmdc")
-        self.edmdc_model = self.init_model("edmdc")
+        self.dmdc_model = self.load_model("dmdc")
+        self.edmdc_model = self.load_model("edmdc")
         # self.nn_model = self.init_model("deep vanilla")
 
         # --- Publishers (One-step prediction output) ---
@@ -72,19 +72,17 @@ class KMMonitor(Node):
             Odometry, "gnc/odom_filtered", self.odom_fallback_callback, 10
         )
 
-    def init_model(self, model_name):
-        """Fetches the latest version from MLflow Model Registry and unwraps it."""
+    def load_model(self, name):
+        version = self.get_parameter(f'{name}_version').value
         try:
-            versions = self.client.get_latest_versions(model_name)
-            latest = versions[0].version
-            model_uri = f"models:/{model_name}/{latest}"
-            loaded = mlflow.pyfunc.load_model(model_uri)
-            self.get_logger().info(f"Successfully loaded {model_name} version {latest}")
-            # Unwrap to access specific Koopman methods if needed
-            return loaded.unwrap_python_model()
+            model = self.client.get_model_version(name, version)
+            run = self.client.get_run(model.run_id)
+            loaded_model = mlflow.pyfunc.load_model(model.source).unwrap_python_model()
+            self.get_logger().info(f"Successfully loaded model '{name}' from {run.info.run_name}.")
+            return loaded_model
+
         except Exception as e:
-            self.get_logger().error(f"Failed to load model '{model_name}': {e}")
-            return None
+            self.get_logger().error(f"Failed to load model: {e}")
 
     def sync_callback(self, odom_msg, wrench_msg):
         """Callback for time-aligned state and control input."""
