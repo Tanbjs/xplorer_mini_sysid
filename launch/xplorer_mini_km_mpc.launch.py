@@ -13,13 +13,48 @@ def generate_launch_description():
             'robots',
             'xplorer_mini_dynamic_parameters.yaml'
         )
-
-    kmpc_config = os.path.join(
+    
+    dpid_gain = os.path.join(
         get_package_share_directory('xplorer_mini_sysid'),
         'config',
-        'kmpc_config.yaml'
+        'controller',
+        'dpid_gain.yaml'
+    )  
+
+    ff_pi_pid_gain = os.path.join(
+        get_package_share_directory('xplorer_mini_sysid'),
+        'config',
+        'controller',
+        'ff_pi_pid_gain.yaml'
+    )
+
+    pid_kmpc_gain = os.path.join(
+        get_package_share_directory('xplorer_mini_sysid'),
+        'config', 
+        'controller', 
+        # 'dmdc', 
+        'edmdc',
+        'pid_kmpc_gain.yaml'
+    )
+
+    ff_pi_lqt_gain = os.path.join(
+        get_package_share_directory('xplorer_mini_sysid'),
+        'config', 
+        'controller', 
+        # 'dmdc', 
+        'edmdc',
+        'ff_pi_lqt_gain.yaml'
     )
     
+    ff_pi_kmpc_gain = os.path.join(
+        get_package_share_directory('xplorer_mini_sysid'),
+        'config', 
+        'controller', 
+        # 'dmdc', 
+        'edmdc',
+        'ff_pi_kmpc_gain.yaml'
+    )
+
     control_node = Node(
         package='xplorer_mini_sysid',
         executable='kmpc.py',
@@ -27,7 +62,7 @@ def generate_launch_description():
         name='kmpc_node',
         output='screen',
         emulate_tty=True,
-        parameters=[{kmpc_config}, {auv_param}, {'use_sim_time': True}]
+        parameters=[{ff_pi_kmpc_gain}, {'use_sim_time': True}]
     )
 
     return LaunchDescription([
