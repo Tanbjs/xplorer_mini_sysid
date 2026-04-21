@@ -3,17 +3,16 @@ import logging
 import warnings
 import os
 import time
-import matplotlib
-from pytest import param
-import yaml
-import json
 
-matplotlib.use('Agg')
 warnings.filterwarnings("ignore")
+
 logging.getLogger("mlflow").setLevel(logging.ERROR)
+logging.getLogger("mlflow.utils.requirements_utils").disabled = True
 logging.getLogger("urllib3").setLevel(logging.ERROR)
 logging.getLogger("matplotlib").setLevel(logging.ERROR)
+
 os.environ["MLFLOW_TRACKING_INSECURE_TLS"] = "true"
+os.environ["MLFLOW_DISABLE_ENV_MANAGER_CONDA_WARNING"] = "TRUE"
 
 import rclpy
 from rclpy.publisher import Publisher
@@ -34,7 +33,8 @@ from mlflow.tracking import MlflowClient
 import numpy as np
 
 from xplorer_mini_python_utils.kinematics import eulerang, odom_to_state_vect, pose_msg_to_vect, pose_vect_to_msg
-from xplorer_mini_sysid.lib.core.params import Weights, Bounds
+from xplorer_mini_sysid.lib.utils.mlflow import load_model
+from xplorer_mini_sysid.lib.utils.virtual import generate_virtual_reference_ff_pi, generate_virtual_reference_pid
 from xplorer_mini_sysid.lib.utils.kinematic import cal_eta_err_with_ssa
 from xplorer_mini_sysid.lib.utils.controller import (create_position_controller, 
                                                     create_velocity_controller, 
@@ -56,13 +56,22 @@ class CascadeKoopmanControl(Node):
         self.mlflow_uri = "https://mlflow.amarr.tan" 
         mlflow.set_tracking_uri(self.mlflow_uri)
         self.mlflow_client = MlflowClient(tracking_uri=self.mlflow_uri)
-        self.N_horizon = self.get_parameter('velocity_controller.params.N_horizon').value if self.get_parameter('velocity_controller.params.N_horizon') is not None else 10
+
+        try: 
+            self.mrb = np.array(self.get_parameter('rigid_body_mass').value).reshape((6, 6))
+            self.N_horizon = self.get_parameter('velocity_controller.params.N_horizon').value if self.get_parameter('velocity_controller.params.N_horizon') is not None else 10
+            self.get_logger().info(f"Mass matrix loaded with shape {self.mrb.shape}.")
+        except Exception as e:
+            self.get_logger().warn(f"Use double loop pid")
+            self.N_horizon = 10
+
         self.dt = 0.1
 
         # --- ROS Event ---
         self.add_on_set_parameters_callback(self.on_parameter_update)
 
         # self.create_subscription(AuvStatus, 'gnc/control_sync', self.control_callback, qos_profile_sensor_data)
+        # self.odom_sub = Subscriber(self, Odometry, 'pose_gt', qos_profile=qos_profile_sensor_data)
         self.odom_sub = Subscriber(self, Odometry, 'gnc/odom_filtered', qos_profile=qos_profile_sensor_data)
         self.path_sub = Subscriber(self, Path, 'gnc/ref_trajectory/window')
         self.ts = ApproximateTimeSynchronizer([self.odom_sub, self.path_sub], queue_size=100, slop=0.15)
@@ -82,18 +91,23 @@ class CascadeKoopmanControl(Node):
         # Position controller
         self.pose_ctrl_type = self.get_parameter('position_controller.type').get_parameter_value().string_value
 
-        if self.pose_ctrl_type == 'pi_ff':
+        if self.pose_ctrl_type == 'ff_pi':
             self.use_feedforward = self.get_parameter('position_controller.use_feedforward').get_parameter_value().bool_value
             self.use_filter = self.get_parameter('position_controller.use_filter').get_parameter_value().bool_value
+            self.get_logger().info(f"Feedforward enabled: {self.use_feedforward}, Filter enabled: {self.use_filter}")
+
         else:
             self.use_feedforward = False
             self.use_filter = False
+            self.get_logger().info("Feedforward disabled for position controller.")
 
         self.pose_ct: PositionControllerType = create_position_controller(**self.get_parameters_by_prefix('position_controller'))
         self.pose_ct_virtual: PositionControllerType =  create_position_controller(**self.get_parameters_by_prefix('position_controller'))
 
         # Velocity controller
-        self.wrapper: Wrapper = self.load_model()    # load kopman model wrapper from MLflow
+        self.wrapper: Wrapper = load_model(client=self.mlflow_client, 
+                                           name=self.get_parameter('model_name').get_parameter_value().string_value, 
+                                           version=self.get_parameter('model_version').get_parameter_value().string_value)
         self.vel_ctrl_type = self.get_parameter('velocity_controller.type').get_parameter_value().string_value
 
         if self.vel_ctrl_type == 'pid':
@@ -206,7 +220,7 @@ class CascadeKoopmanControl(Node):
             return 
         
         # --- 2. INNER LOOP (MPC) ---
-        if self.vel_controller == 'mpc_aug_error_output':
+        if self.vel_ctrl_type == 'mpc_aug_error_output':
             tau_cmd = self.vel_ct.compute_control(vel, vel, v_cmd_b)
         else:
             tau_cmd = self.vel_ct.compute_control(vel, v_cmd_b)
@@ -218,19 +232,6 @@ class CascadeKoopmanControl(Node):
         self.publish_wrench(tau_cmd)
         self.publish_twist(self.twist_pub, current_v_ref)
         self.publish_twist(self.err_twist_pub, current_v_ref - vel)  
-
-    def load_model(self) -> Wrapper:
-        name = self.get_parameter('model_name').value
-        version = self.get_parameter('model_version').value
-        try:
-            model = self.mlflow_client.get_model_version(name, version)
-            run = self.mlflow_client.get_run(model.run_id)
-            loaded_model = mlflow.pyfunc.load_model(model.source).unwrap_python_model()
-            self.get_logger().info(f"Successfully loaded model '{name}' from {run.info.run_name}.")
-            return loaded_model
-
-        except Exception as e:
-            self.get_logger().error(f"Failed to load model: {e}")
 
     def publish_pose_error(self, eta_error: np.ndarray):
         msg = PoseStamped()
@@ -255,68 +256,6 @@ class CascadeKoopmanControl(Node):
         msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z = float(nu[3]), float(nu[4]), float(nu[5])
         publisher.publish(msg)
 
-    def generate_virtual_reference_pid(self, eta_ref_window, eta, nu_cmd_b):
-        
-        # Preallocate 
-        nu_hat_cmd_b_window = np.zeros((self.N_horizon, 6))
-        eta_hat = np.copy(eta)
-        nu_hat_cmd_b_window[0] = nu_cmd_b
-
-        # Get current outer loop integral and derivative states for continuity in the virtual controller
-        self.pose_ct_virtual.integral = np.copy(self.pose_ct.integral)
-        self.pose_ct_virtual.prev_error = np.copy(self.pose_ct.prev_error)
-        
-        for i in range(1, self.N_horizon):
-            eta_ref = eta_ref_window[i]
-            nu_hat_cmd_b = self.pose_ct_virtual.compute_control(eta_hat, eta_ref, self.dt)
-            J, _, _ = eulerang(eta_hat[3], eta_hat[4], eta_hat[5])
-            nu_hat_cmd_b_window[i] = nu_hat_cmd_b
-            eta_hat = eta_hat + self.dt * (J @ nu_hat_cmd_b)
-
-        return nu_hat_cmd_b_window
-    
-    def generate_virtual_reference_ff_pi(self, eta_ref_window, eta, nu_cmd_b):
-        # Numerical differentiation for Feed-forward (dot{eta}_ref)
-
-        if self.use_filter:
-            last_filt_val = np.copy(self.eta_dot_ref_filtered) 
-            alpha = self.alpha_ff
-            eta_dot_ref_window = np.zeros_like(eta_ref_window)
-            for i in range(1, self.N_horizon):
-                eta_dot_ref_raw_diff = cal_eta_err_with_ssa(eta_ref_window[i], eta_ref_window[i-1]) / self.dt
-                eta_dot_ref_window[i] = (alpha * eta_dot_ref_raw_diff) + (1.0 - alpha) * last_filt_val
-                last_filt_val = eta_dot_ref_window[i]
-        else: 
-            eta_dot_ref_window = np.gradient(eta_ref_window, self.dt, axis=0, edge_order=1)
-
-        nu_hat_cmd_b_window = np.zeros((self.N_horizon, 6))
-        
-        # Clone current state for virtual reference simulation
-        eta_hat = np.copy(eta)
-        self.pose_ct_virtual.integral = np.copy(self.pose_ct.integral)
-        
-        # Initial step
-        nu_hat_cmd_b_window[0] = nu_cmd_b
-
-        for i in range(1, self.N_horizon):
-            eta_ref = eta_ref_window[i]
-            v_ff = eta_dot_ref_window[i] if self.use_feedforward else np.zeros(6)
-            
-            # Predict next velocity in Body Frame
-            nu_b = self.pose_ct_virtual.compute_control(eta_hat, eta_ref, self.dt, v_ff)
-            nu_hat_cmd_b_window[i] = nu_b
-            
-            # Kinematics Update: Convert Body Velocity to NED Velocity
-            # dot{eta} = J(eta) * nu_b
-            J, _, _ = eulerang(eta_hat[3], eta_hat[4], eta_hat[5]) # J in future
-            # J, _, _ = eulerang(eta[3], eta[4], eta[5]) # J at current state for better stability in virtual sim
-            eta_dot_hat = J @ nu_b
-            
-            # Update Virtual Pose (Forward Euler)
-            eta_hat = eta_hat + (self.dt * eta_dot_hat)
-
-        return nu_hat_cmd_b_window
-
     def on_parameter_update(self, params):
 
         for param in params:
@@ -329,10 +268,10 @@ class CascadeKoopmanControl(Node):
                     self.pose_ct.set_params(**{key: val})
                     
                     # Structured Logging
-                    self.get_logger().info(f"Position controller updated:\n{self.pose_ct.params.get(key)}")
+                    self.get_logger().info(f"Position controller updated\n{key}: {self.pose_ct.params.get(key)}")
                     if self.use_preview:
                         self.pose_ct_virtual.set_params(**{key: val})
-                        self.get_logger().info(f"Virtual position controller parameters updated.\n {self.pose_ct_virtual.params.get(key)}")
+                        self.get_logger().info(f"Virtual position controller parameters updated\n{key}: {self.pose_ct_virtual.params.get(key)}")
 
             elif param_name.startswith('velocity_controller.'):
                 if 'params' in param_name:
@@ -341,11 +280,11 @@ class CascadeKoopmanControl(Node):
                     if hasattr(self.vel_ct.params.weights, key):
                         val = np.diag(val)
                         self.vel_ct.set_params(**{key: val})
-                        self.get_logger().info(f"Velocity controller updated:\n {np.array2string(getattr(self.vel_ct.params.weights, key), precision=2, suppress_small=True)}")
+                        self.get_logger().info(f"Velocity controller updated\n{key}: {np.diag(getattr(self.vel_ct.params.weights, key))}")
 
                     elif hasattr(self.vel_ct.params.bounds, key):
                         self.vel_ct.set_params(**{key: val})
-                        self.get_logger().info(f"Velocity controller updated:\n {np.array2string(getattr(self.vel_ct.params.bounds, key), precision=2, suppress_small=True)}")
+                        self.get_logger().info(f"Velocity controller updated\n{key}: {getattr(self.vel_ct.params.bounds, key)}")
                     
             else:            
                 self.get_logger().warning(f"Parameter update received for: {param_name}")
@@ -383,22 +322,40 @@ class CascadeKoopmanControl(Node):
             nu_cmd_b = self.pose_ct.compute_control(self.eta, eta_ref_window[0], self.dt)
 
         # Velocity control
-        if 'mpc' in self.vel_ctrl_type or 'lqr' in self.vel_ctrl_type:
+        if 'mpc' in self.vel_ctrl_type:
             if self.use_preview:
                 if self.pose_ctrl_type == 'pid':
-                    self.nu_hat_cmd_b_window = self.generate_virtual_reference_pid(eta_ref_window, self.eta, nu_cmd_b)
+                    self.nu_hat_cmd_b_window = generate_virtual_reference_pid(eta_ref_window=eta_ref_window,
+                                                                              eta=self.eta, nu_cmd_b=nu_cmd_b, dt=self.dt,
+                                                                              pose_ct_actual=self.pose_ct,
+                                                                              pose_ct_virtual=self.pose_ct_virtual)
                 elif self.pose_ctrl_type == 'ff_pi':
-                    self.nu_hat_cmd_b_window = self.generate_virtual_reference_ff_pi(eta_ref_window, self.eta, nu_cmd_b)
-                self.tau_cmd = self.vel_ct.compute_control(self.nu, self.nu_hat_cmd_b_window)
+                    self.nu_hat_cmd_b_window = generate_virtual_reference_ff_pi(eta_ref_window=eta_ref_window, 
+                                                                                eta=self.eta, nu_cmd_b=nu_cmd_b, 
+                                                                                use_filter=self.use_filter, 
+                                                                                eta_dot_ref_filtered=self.eta_dot_ref_filtered, 
+                                                                                alpha_ff=self.alpha_ff, 
+                                                                                N_horizon=self.N_horizon, 
+                                                                                dt=self.dt, 
+                                                                                pose_ct_actual=self.pose_ct, 
+                                                                                pose_ct_virtual=self.pose_ct_virtual, 
+                                                                                use_feedforward=self.use_feedforward)
+                tau_cmd = self.vel_ct.compute_control(self.nu, self.nu_hat_cmd_b_window)
+                # tau_cmd = self.mrb @ self.vel_ct.compute_control(self.nu, self.nu_hat_cmd_b_window)
             else:
-                self.tau_cmd = self.vel_ct.compute_control(self.nu, nu_cmd_b)
+                tau_cmd = self.vel_ct.compute_control(self.nu, nu_cmd_b)
+                # tau_cmd = self.mrb @ self.vel_ct.compute_control(self.nu, nu_cmd_b)
         else:
-            self.tau_cmd = self.vel_ct.compute_control(self.nu, nu_cmd_b, self.dt)
-            
+            tau_cmd = self.vel_ct.compute_control(self.nu, nu_cmd_b, self.dt)
+            # tau_cmd = self.mrb @ self.vel_ct.compute_control(self.nu, nu_cmd_b, self.dt)
+        
+        # Clip control commands to prevent sending extreme values to Gazebo
+        tau_cmd = np.clip(np.asarray(tau_cmd).flatten(), -200, 200)
+
         # publish control commands
         if self.use_feedforward:
             self.publish_twist(self.twist_dot_pub, eta_ref_dot)  # Publish feedforward reference for debugging/analysis
-        self.publish_wrench(self.tau_cmd)
+        self.publish_wrench(tau_cmd)
         self.publish_pose_error(cal_eta_err_with_ssa(eta_ref_window[0], self.eta))
         self.publish_twist(self.twist_pub, nu_cmd_b)
         self.publish_twist(self.err_twist_pub, nu_cmd_b - self.nu)  
