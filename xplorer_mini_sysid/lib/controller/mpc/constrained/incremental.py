@@ -17,8 +17,8 @@ import control as ct
 from control import ctrb, dlqr
 from kmc.utils.model_wrapper import DeepModelWrapper, DMDcWrapper, EDMDcWrapper
 
-from .base import KMPC, MPCParams
-from ...core.model import LinearModel
+from ..base import KMPC, MPCParams
+from ....core.model import LinearModel
 
 
 class IncrementalStateForm(KMPC):
@@ -48,6 +48,7 @@ class IncrementalStateForm(KMPC):
         self._model = self._setup_acados_model()
         self._constraints = self._setup_acados_constraints()
         self._solver = self._setup_acados_solver()
+        self._logger.info("Incremental State Form MPC initialized successfully.")
         
     def _dare_solution(self):
         nz = self.model.dyn.A.shape[0]

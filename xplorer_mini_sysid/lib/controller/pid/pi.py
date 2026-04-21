@@ -6,8 +6,8 @@ class PositionFFPIController:
     def __init__(self, kp, ki, int_limit=None, sat_bound=None):
         self.kp = np.array(kp)
         self.ki = np.array(ki)
-        self.int_limit = np.array(int_limit) if int_limit is not None else np.ones(6)
-        self.sat_bound = np.array(sat_bound) if sat_bound is not None else np.ones(6)
+        self.int_limit = np.array(int_limit) if int_limit is not None else None
+        self.sat_bound = np.array(sat_bound) if sat_bound is not None else None
         self.integral = np.zeros(6)
     
     @property
@@ -20,48 +20,52 @@ class PositionFFPIController:
         }
     
     def set_params(self, **kwargs):
-        kp = kwargs.get('kp')
-        ki = kwargs.get('ki')
-        int_limit = kwargs.get('int_limit')
-        sat_bound = kwargs.get('sat_bound')
-
-        if kp is not None:
-            self.kp = np.array(kp)
-        if ki is not None:
-            self.ki = np.array(ki)
-        if int_limit is not None:
-            self.int_limit = np.array(int_limit)
-        if sat_bound is not None:
-            self.sat_bound = np.array(sat_bound)
+        if 'kp' in kwargs:
+            self.kp = np.array(kwargs['kp'])
+        if 'ki' in kwargs:
+            self.ki = np.array(kwargs['ki'])
+        if 'int_limit' in kwargs:
+            val = kwargs['int_limit']
+            self.int_limit = np.array(val) if val is not None else None
+        if 'sat_bound' in kwargs:
+            val = kwargs['sat_bound']
+            self.sat_bound = np.array(val) if val is not None else None
 
     def compute_control(self, eta, eta_ref, dt, eta_ref_dot=None):
-        # 1. Position Error in NED
-        eta_error_n = cal_eta_err_with_ssa(eta_ref, eta)
+            if dt <= 0.0:
+                return np.zeros(6)
 
-        # 2. Coordinate Transformation (NED -> Body)
-        J, _, _ = eulerang(eta[3], eta[4], eta[5])
-        inv_J = np.linalg.pinv(J)
-        
-        # Error and Feed-forward in Body Frame
-        error_b = inv_J @ eta_error_n
-        
-        if eta_ref_dot is None:
-            ff_b = np.zeros(6)
-        else:
-            ff_b = inv_J @ np.array(eta_ref_dot)
+            # 1. Position Error in NED
+            eta_error_n = cal_eta_err_with_ssa(eta_ref, eta)
+            
+            # 2. Feed-forward in NED
+            ff_n = np.array(eta_ref_dot) if eta_ref_dot is not None else np.zeros(6)
 
-        # 3. Control Law (Body Frame)
-        # u_b = Kp*e_b + Ki*integral_b + ff_b
-        nu_cmd_unsat = (self.kp * error_b) + (self.ki * self.integral) + ff_b
-        nu_cmd_b = np.clip(nu_cmd_unsat, -self.sat_bound, self.sat_bound)
+            # 3. Control Law in NED Frame (P + I + FF)
+            nu_cmd_n_unsat = ff_n + (self.kp * eta_error_n) + (self.ki * self.integral)
 
-        # 4. Anti-windup: Clamping logic
-        is_saturated = np.abs(nu_cmd_unsat) > self.sat_bound
-        same_direction = np.sign(error_b) == np.sign(nu_cmd_unsat)
-        stop_integrating = is_saturated & same_direction
+            # 4. Coordinate Transformation (NED -> Body)
+            J, _, _ = eulerang(eta[3], eta[4], eta[5])
+            inv_J = np.linalg.pinv(J)
+            
+            # Multiply J^-1 to the entire sum
+            nu_cmd_b_unsat = inv_J @ nu_cmd_n_unsat
 
-        # Update Integral state in Body Frame
-        self.integral += (~stop_integrating) * (error_b * dt)
-        self.integral = np.clip(self.integral, -self.int_limit, self.int_limit)
+            if self.sat_bound is not None:
+                nu_cmd_b_sat = np.clip(nu_cmd_b_unsat, -self.sat_bound, self.sat_bound)
+                
+                # --- Back-Calculation Anti-Windup ---
+                delta_nu_b = nu_cmd_b_unsat - nu_cmd_b_sat
+                delta_nu_n = J @ delta_nu_b
+                self.integral += (eta_error_n * dt) - (delta_nu_n * dt)
+                
+                nu_cmd_b = nu_cmd_b_sat
+            else:
+                nu_cmd_b = nu_cmd_b_unsat
+                self.integral += eta_error_n * dt
 
-        return nu_cmd_b
+            # 5. Global Integral Limit (Safety Bounding)
+            if self.int_limit is not None:
+                self.integral = np.clip(self.integral, -self.int_limit, self.int_limit)
+
+            return nu_cmd_b

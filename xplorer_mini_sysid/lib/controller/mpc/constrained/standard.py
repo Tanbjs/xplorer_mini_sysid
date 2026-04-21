@@ -8,10 +8,10 @@ from control import dlqr
 from acados_template import AcadosOcp, AcadosOcpSolver, AcadosOcpDims, AcadosModel, AcadosOcpConstraints, AcadosOcpCost
 from kmc.utils.model_wrapper import DMDcWrapper, EDMDcWrapper, DeepModelWrapper
 
-from .base import KMPC, MPCParams
+from ..base import KMPC, MPCParams
 
 
-class StandardStateForm(KMPC):
+class ConstrainedStandardStateForm(KMPC):
     def __init__(self, 
                  model_wrapper : DMDcWrapper | EDMDcWrapper | DeepModelWrapper,
                  mpc_params: MPCParams,
@@ -33,6 +33,7 @@ class StandardStateForm(KMPC):
         self._cost = self._setup_acados_cost()
         self._constraints = self._setup_acados_constraints()
         self._solver = self._setup_acados_solver()
+        self._logger.info(f"Standard State Form MPC initialized with use_preview={self._use_preview}.")
 
     @property
     def params(self) -> MPCParams:
@@ -41,14 +42,19 @@ class StandardStateForm(KMPC):
     def _dare_solution(self): 
         Qz = self.model.dyn.C.T @ self.mpc_params.weights.Q @ self.model.dyn.C
         Rz = self.mpc_params.weights.R_abs
-        _, P, _ = dlqr(self.model.dyn.A, self.model.dyn.B, Qz, Rz)
-
-        # check if P is positive definite
-        min_eig = np.min(np.real(np.linalg.eigvals(P)))
-        if min_eig > -1e-10:
-            self._logger.info(f"DARE solution P is stable (min eig: {min_eig:.2e})")
-        else:
-            self._logger.warning(f"DARE solution P has significant negative eigenvalue: {min_eig:.2e}")
+        K, P, _ = dlqr(self.model.dyn.A, self.model.dyn.B, Qz, Rz)
+        self.A_cl_T = (self.model.dyn.A - self.model.dyn.B @ K).T
+        
+        # Analyze Closed-Loop Stability
+        eigvals = np.linalg.eigvals(self.A_cl_T)
+        eig_magnitudes = np.abs(eigvals)
+        max_eig = np.max(eig_magnitudes)
+        if self._logger:
+            # A system is stable if all eigenvalues lie strictly inside the unit circle
+            if max_eig < 1.0 + 1e-10: 
+                self._logger.info(f"System is stable (spectral radius: {max_eig:.2e})")
+            else:
+                self._logger.warning(f"System is unstable (max eig magnitude: {max_eig:.2e})")
 
         return P
     
@@ -61,8 +67,8 @@ class StandardStateForm(KMPC):
         sym_z = SX.sym('z', nz)
         sym_u = SX.sym('u', nu)
         model.x, model.u = sym_z, sym_u
-        model.disc_dyn_expr = DM(self.model.dyn.A) @ sym_z + DM(self.model.dyn.B) @ sym_u
         
+        model.disc_dyn_expr = DM(self.model.dyn.A) @ sym_z + DM(self.model.dyn.B) @ sym_u
         return model
     
     def _setup_acados_dims(self) -> AcadosOcpDims:
@@ -113,16 +119,28 @@ class StandardStateForm(KMPC):
         ny = self.model.dyn.C.shape[0]
 
         # Input bounds
-        tau_max_sc = self.model.scaler_u.transform(np.array(self.mpc_params.bounds.u_max).reshape(1, -1)).flatten()
-        constraints.lbu, constraints.ubu = -tau_max_sc, tau_max_sc
-        constraints.idxbu = np.arange(nu)
+        if self.mpc_params.bounds.u_max is not None:
+            tau_max_sc = self.model.scaler_u.transform(np.array(self.mpc_params.bounds.u_max).reshape(1, -1)).flatten()
+            constraints.lbu, constraints.ubu = -tau_max_sc, tau_max_sc
+            constraints.idxbu = np.arange(nu)
+            if self._logger:
+                self._logger.info(f"Applied input bounds (scaled): {tau_max_sc}")
+        else:
+            if self._logger:
+                self._logger.info("No input bounds applied.")
 
-        # Path bounds (Output constraints)
-        v_max_sc = self.model.scaler_y.transform(np.array(self.mpc_params.bounds.y_max).reshape(1, -1)).flatten()
-        v_min_sc = self.model.scaler_y.transform(np.array(self.mpc_params.bounds.y_min).reshape(1, -1)).flatten()
-        constraints.C = self.model.dyn.C 
-        constraints.D = np.zeros((ny, nu))
-        constraints.lg, constraints.ug = v_min_sc, v_max_sc
+        # Output bounds
+        if self.mpc_params.bounds.y_max is not None and self.mpc_params.bounds.y_min is not None:
+            v_max_sc = self.model.scaler_y.transform(np.array(self.mpc_params.bounds.y_max).reshape(1, -1)).flatten()
+            v_min_sc = self.model.scaler_y.transform(np.array(self.mpc_params.bounds.y_min).reshape(1, -1)).flatten()
+            constraints.C = self.model.dyn.C 
+            constraints.D = np.zeros((ny, nu))
+            constraints.lg, constraints.ug = v_min_sc, v_max_sc
+            if self._logger:
+                self._logger.info(f"Applied output bounds (scaled): min {v_min_sc}, max {v_max_sc}")
+        else: 
+            if self._logger:
+                self._logger.info("No output bounds applied.")
         
         # Initial condition
         constraints.idxbx_0 = np.arange(nz)
@@ -150,7 +168,8 @@ class StandardStateForm(KMPC):
         ocp.solver_options.N_horizon = self.mpc_params.N_horizon
         ocp.solver_options.tf = self.mpc_params.N_horizon * self.mpc_params.dt
         ocp.solver_options.integrator_type = 'DISCRETE'
-        ocp.solver_options.nlp_solver_type = 'SQP_RTI'
+        ocp.solver_options.nlp_solver_max_iter = 20
+        ocp.solver_options.nlp_solver_type = 'SQP'
         ocp.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
         ocp.solver_options.qp_solver_cond_N = 5 
         ocp.solver_options.print_level = 0
@@ -211,7 +230,7 @@ class StandardStateForm(KMPC):
         return self.model.scaler_u.inverse_transform(u_0).flatten()
     
 
-class StandardOutputForm(KMPC):
+class ConstrainedStandardOutputForm(KMPC):
     def __init__(self, 
                  model_wrapper : DMDcWrapper | EDMDcWrapper | DeepModelWrapper,
                  mpc_params: MPCParams,

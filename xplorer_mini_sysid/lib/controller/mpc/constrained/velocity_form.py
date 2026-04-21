@@ -17,8 +17,8 @@ import control as ct
 from control import ctrb, dlqr
 from kmc.utils.model_wrapper import DeepModelWrapper, DMDcWrapper, EDMDcWrapper
 
-from .base import KMPC, MPCParams
-from ...core.model import LinearModel
+from ..base import KMPC, MPCParams
+from ....core.model import LinearModel
 
 
 class VelocityForm(KMPC):

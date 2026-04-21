@@ -2,111 +2,118 @@ import numpy as np
 from control import dlqr
 from kmc.utils.model_wrapper import DMDcWrapper, EDMDcWrapper, DeepModelWrapper
 
-from .base import KLQR, LQRParams
+from ..base import KMPC, MPCParams
 
 
-class StandardStateForm(KLQR):
+class UnconstrainedStateForm(KMPC):
     def __init__(self, 
-                 model_wrapper : DMDcWrapper | EDMDcWrapper | DeepModelWrapper,
-                 lqr_params: LQRParams,
-                 use_preview: bool = False,
+                 model_wrapper, 
+                 mpc_params, 
+                 use_preview: bool = False, 
                  logger=None):
         
-        # Logging & Identification
         self._logger = logger
         self._use_preview = use_preview
+        super().__init__(model_wrapper, mpc_params)
 
-        # Initialize base class to set model and LQR params
-        super().__init__(model_wrapper, lqr_params)
-
-        # Initialize preview matrices
-        self.K_ff = None
-        self.A_cl_T = None
-        self.C_T_Q = None
-        self.M_ss = None
-
-        # Compute LQR gain and offline matrices
-        self.K = self._dare_solution()
+        self.N_horizon = self.mpc_params.N_horizon
+        self.A = self.model.dyn.A
+        self.B = self.model.dyn.B
+        self.Qz = None
+        self.R = self.mpc_params.weights.R_abs
+        self.P_terminal = None 
+        
+        self._setup_matrices()
+        self._logger.info("Unconstrained State Form MPC initialized successfully.")
 
     @property
-    def params(self) -> LQRParams:
-        return self.lqr_params
-        
-    def _dare_solution(self):
-        A = self.model.dyn.A
-        B = self.model.dyn.B
+    def params(self):
+        return self.mpc_params
+    
+    def _setup_matrices(self):
+        """Precompute weights and check theoretical infinite-horizon stability."""
         C = self.model.dyn.C
-        Qy = self.lqr_params.weights.Q
-        Ru = self.lqr_params.weights.R_abs
+        Qy = self.mpc_params.weights.Q
         self.Qz = C.T @ Qy @ C
-        K, P, _ = dlqr(A, B, self.Qz, Ru)
+        
+        # Solve DARE to get the steady-state P
+        K_ss, P_ss, _ = dlqr(self.A, self.B, self.Qz, self.R)
+        self.P_terminal = P_ss
 
-        self.A_cl_T = (A - B @ K).T
-
-        # Analyze Closed-Loop Stability
-        eigvals = np.linalg.eigvals(self.A_cl_T)
-        eig_magnitudes = np.abs(eigvals)
-        max_eig = np.max(eig_magnitudes)
-
+        # Theoretical check: Check if (A, B) is even stabilizable
+        eig_cl = np.linalg.eigvals(self.A - self.B @ K_ss)
+        max_rho = np.max(np.abs(eig_cl))
+        
         if self._logger:
-            # A system is stable if all eigenvalues lie strictly inside the unit circle
-            if max_eig < 1.0 + 1e-10: 
-                self._logger.info(f"System is stable (spectral radius: {max_eig:.2e})")
+            if max_rho < 1.0 + 1e-10:
+                self._logger.info(f"Offline Stability Check: PASSED (rho = {max_rho:.4f})")
             else:
-                self._logger.warning(f"System is unstable (max eig magnitude: {max_eig:.2e})")
+                self._logger.error(f"Offline Stability Check: FAILED (rho = {max_rho:.4f}). Check your Koopman Model!")
 
-        self.K_ff = np.linalg.solve(Ru + B.T @ P @ B, B.T)
+    def _solve_finite_horizon_recursion(self, z_ref_trajectory):
+        """Backward pass with internal stability monitoring."""
+        N_p = z_ref_trajectory.shape[0]     
+        S = self.P_terminal
+        v = self.P_terminal @ z_ref_trajectory[-1].reshape(-1, 1)
+        K_k, K_ff_k, v_next = None, None, None
 
-        I = np.eye(self.A_cl_T.shape[0])
-        self.M_ss = np.linalg.solve(I - self.A_cl_T, self.Qz)
+        for i in range(N_p - 1, -1, -1):
+            inv_term = np.linalg.inv(self.B.T @ S @ self.B + self.R)
+            K_i = inv_term @ self.B.T @ S @ self.A
+            K_ff_i = inv_term @ self.B.T
+            
+            if i == 0:
+                K_k = K_i
+                K_ff_k = K_ff_i
+                v_next = v 
+                self._verify_online_stability(K_k)
+            
+            A_cl_T = (self.A - self.B @ K_i).T
+            v = A_cl_T @ v + self.Qz @ z_ref_trajectory[i].reshape(-1, 1)
+            S = self.A.T @ S @ (self.A - self.B @ K_i) + self.Qz
+            
+        return K_k, K_ff_k, v_next
 
-        return K
-
-    def __post_set_params_update(self):
-        self.K = self._dare_solution()
-
-    def set_params(self, **kwargs):
-        if 'use_preview' in kwargs:
-            self._use_preview = kwargs.pop('use_preview')
-        super().set_params(**kwargs)
-        self.__post_set_params_update()
+    def _verify_online_stability(self, K_current):
+        """Check the spectral radius of the gain being applied to the AUV."""
+        A_cl = self.A - self.B @ K_current
+        rho = np.max(np.abs(np.linalg.eigvals(A_cl)))
+        if rho >= 1.0 + 1e-10:
+            if self._logger:
+                self._logger.warning(f"Online Stability Warning: rho = {rho:.4f} >= 1.0!")
 
     def compute_control(self, x, y_ref):
-        """
-        Compute control input based on the current mode.
-        Args:
-            x: Current state array (1D)
-            y_cmd: Target command. Can be 1D (Setpoint) or 2D array (Trajectory: N_p x n_y)
-        """
+        # 1. Transform Reference (Implicit Mode Selection via Input Dimension)
         if y_ref.ndim == 1:
+            # Setpoint Mode: Hold the single value across the predefined horizon (ZOH)
             y_ref_scaled = self.model.scaler_y.transform(y_ref.reshape(1, -1))
-            z_ref_scaled = self.model.lift(y_ref_scaled).reshape(-1,1).flatten()
+            z_ref_single = self.model.lift(y_ref_scaled).reshape(1, -1)
+            z_ref_trajectory = np.repeat(z_ref_single, self.N_horizon, axis=0)
         else: 
+            # Trajectory Mode: Use the provided prediction window directly (Preview)
             y_ref_scaled = self.model.scaler_y.transform(y_ref)
-            z_ref_scaled = self.model.lift(y_ref_scaled)
+            z_ref_trajectory = self.model.lift(y_ref_scaled)
 
-        # Lift and Scale State
+        # 2. Lift Current State
         x_scaled = self.model.scaler_x.transform(x.reshape(1, -1)).flatten() if self.model.scaler_x else x.flatten()
-        z_scaled = self.model.lift(x_scaled)
+        z_scaled = self.model.lift(x_scaled).reshape(-1, 1)
         
-        if self._use_preview:
-            s = self.M_ss @ z_ref_scaled[-1]
-            for i in range(z_ref_scaled.shape[0] - 2, -1, -1):
-                s = self.A_cl_T @ s + self.Qz @ z_ref_scaled[i]
-        else:
-            s = self.M_ss @ z_ref_scaled
+        # 3. Finite Horizon Calculation
+        K_k, K_ff_k, v_next = self._solve_finite_horizon_recursion(z_ref_trajectory)
+        
+        # 4. Control Law (Anticipatory Action)
+        u_scaled = -K_k @ z_scaled + K_ff_k @ v_next
 
-        u_scaled = -self.K @ z_scaled + self.K_ff @ s
-        
+        # 5. Scaling Output to PWM/Force
         if self.model.scaler_u:
             return self.model.scaler_u.inverse_transform(u_scaled.reshape(1, -1)).flatten()
         return u_scaled.flatten()
-    
 
-class StandardOutputForm(KLQR):
+class UnconstrainedOutputForm(KMPC):
+
     def __init__(self, 
                  model_wrapper : DMDcWrapper | EDMDcWrapper | DeepModelWrapper,
-                 lqr_params: LQRParams,
+                 mpc_params: MPCParams,
                  use_preview: bool = False,
                  logger=None):
         
@@ -115,7 +122,7 @@ class StandardOutputForm(KLQR):
         self._use_preview = use_preview
 
         # Initialize base class to set model and LQR params
-        super().__init__(model_wrapper, lqr_params)
+        super().__init__(model_wrapper, mpc_params)
 
         # Initialize preview matrices
         self.K_ff = None
@@ -128,14 +135,14 @@ class StandardOutputForm(KLQR):
 
     @property
     def params(self):
-        return self.lqr_params
+        return self.mpc_params
         
     def _dare_solution(self):
         A = self.model.dyn.A
         B = self.model.dyn.B
         C = self.model.dyn.C
-        Q_y = self.lqr_params.weights.Q
-        R_u = self.lqr_params.weights.R_abs
+        Q_y = self.mpc_params.weights.Q
+        R_u = self.mpc_params.weights.R_abs
 
         # 1. Solve DARE for Feedback Gain
         Qz = C.T @ Q_y @ C
@@ -197,3 +204,5 @@ class StandardOutputForm(KLQR):
         if self.model.scaler_u:
             return self.model.scaler_u.inverse_transform(u_scaled.reshape(1, -1)).flatten()
         return u_scaled.flatten()
+    
+
