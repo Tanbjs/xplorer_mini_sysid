@@ -105,9 +105,15 @@ class CascadeKoopmanControl(Node):
         self.pose_ct_virtual: PositionControllerType =  create_position_controller(**self.get_parameters_by_prefix('position_controller'))
 
         # Velocity controller
+        
+        # load Koopman model from MLflow based on parameters
+        model_name_str = str(self.get_parameter('model_name').value)
+        model_version_str = str(self.get_parameter('model_version').value)
         self.wrapper: Wrapper = load_model(client=self.mlflow_client, 
-                                           name=self.get_parameter('model_name').get_parameter_value().string_value, 
-                                           version=self.get_parameter('model_version').get_parameter_value().string_value)
+                                        name=model_name_str, 
+                                        version=model_version_str)
+        
+        # velocity controller type
         self.vel_ctrl_type = self.get_parameter('velocity_controller.type').get_parameter_value().string_value
 
         if self.vel_ctrl_type == 'pid':
