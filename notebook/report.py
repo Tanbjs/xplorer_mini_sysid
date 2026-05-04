@@ -4,17 +4,15 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 from pathlib import Path
 from collections import defaultdict
 from mcap_ros2.reader import read_ros2_messages
 from scipy.spatial.transform import Rotation as R
 
 # ==========================================
-# 1. Helper Functions
+# 1. Helper Functions & Data Mapping
 # ==========================================
-def wrap_angle_deg(angle_array):
-    return (angle_array + 180.0) % 360.0 - 180.0
-
 def flatten_msg(msg_obj, prefix=""):
     items = {}
     for slot in dir(msg_obj):
@@ -25,9 +23,6 @@ def flatten_msg(msg_obj, prefix=""):
         else: items[key] = val
     return items
 
-# ==========================================
-# 2. Dynamic Mapping System
-# ==========================================
 def build_topic_map(df):
     ref_prefix, act_prefix, cmd_prefix = None, None, None
     for col in df.columns:
@@ -37,8 +32,10 @@ def build_topic_map(df):
             act_prefix = col.replace('.pose.pose.position.x', '')
         elif col.endswith('nu_cmd.linear.x'):
             cmd_prefix = col.replace('.linear.x', '')
+            
     if not ref_prefix or not act_prefix: return None
-    return {
+    
+    tmap = {
         'ref_pos_x': f'{ref_prefix}.position.x', 'ref_pos_y': f'{ref_prefix}.position.y', 'ref_pos_z': f'{ref_prefix}.position.z', 'ref_ori': f'{ref_prefix}.orientation',
         'act_pos_x': f'{act_prefix}.pose.pose.position.x', 'act_pos_y': f'{act_prefix}.pose.pose.position.y', 'act_pos_z': f'{act_prefix}.pose.pose.position.z', 'act_ori': f'{act_prefix}.pose.pose.orientation',
         'cmd_u': f'{cmd_prefix}.linear.x', 'cmd_v': f'{cmd_prefix}.linear.y', 'cmd_w': f'{cmd_prefix}.linear.z',
@@ -47,23 +44,38 @@ def build_topic_map(df):
         'act_p': f'{act_prefix}.twist.twist.angular.x', 'act_q': f'{act_prefix}.twist.twist.angular.y', 'act_r': f'{act_prefix}.twist.twist.angular.z',
     }
 
+    for col in df.columns:
+        if col.endswith('est_tau.force.x'):
+            tau_p = col.replace('.force.x', '')
+            tmap.update({
+                'tau_x': f'{tau_p}.force.x',  'tau_y': f'{tau_p}.force.y',  'tau_z': f'{tau_p}.force.z',
+                'tau_k': f'{tau_p}.torque.x', 'tau_m': f'{tau_p}.torque.y', 'tau_n': f'{tau_p}.torque.z'
+            })
+            break
+        elif col.endswith('wrench.force.x'):
+            tau_p = col.replace('.wrench.force.x', '')
+            tmap.update({
+                'tau_x': f'{tau_p}.wrench.force.x',  'tau_y': f'{tau_p}.wrench.force.y',  'tau_z': f'{tau_p}.wrench.force.z',
+                'tau_k': f'{tau_p}.wrench.torque.x', 'tau_m': f'{tau_p}.wrench.torque.y', 'tau_n': f'{tau_p}.wrench.torque.z'
+            })
+            break
+            
+    return tmap
 # ==========================================
-# 3. Data Loading & Statistical Filtering
+# 2. Data Loading & Statistical Filtering
 # ==========================================
 def load_and_sync_data(base_dir, controllers, path_type):
     base_path = Path(base_dir).expanduser().resolve()
     raw_storage = {}
     
-    print("\n[*] Step 1: Loading MCAP files and performing Initial Sample Count...")
+    print("\n[*] Initializing Data Pipeline...")
     for ctrl in controllers:
         mcap_files = list((base_path / ctrl / path_type).rglob('*.mcap'))
         if not mcap_files: 
             print(f"    [!] Skip: {ctrl} (MCAP not found)")
             continue
         
-        print(f"    - Loading {ctrl}...")
-        with open(mcap_files[0], 'rb') as f:
-            mcap_stream = io.BytesIO(f.read())
+        with open(mcap_files[0], 'rb') as f: mcap_stream = io.BytesIO(f.read())
             
         data_by_topic = defaultdict(list)
         for msg in read_ros2_messages(mcap_stream):
@@ -74,43 +86,29 @@ def load_and_sync_data(base_dir, controllers, path_type):
         dfs = [pd.DataFrame(recs).set_index('_log_time').rename(columns=lambda c: f"{t}.{c}") for t, recs in data_by_topic.items()]
         df = pd.concat(dfs, axis=1).sort_index()
         raw_storage[ctrl] = {'df': df, 'len': len(df)}
-        print(f"      -> Total Samples: {len(df)}")
+        print(f"    - {ctrl}: {len(df)} samples")
 
     if not raw_storage: return {}
 
-    all_lengths = [v['len'] for v in raw_storage.values()]
-    mean_len = np.mean(all_lengths)
-    print(f"\n[*] Step 2: Statistical Outlier Detection (Mean = {mean_len:.2f})")
-    
-    filtered_storage = {}
-    for ctrl, data in raw_storage.items():
-        if data['len'] < mean_len:
-            print(f"    [REJECTED] {ctrl}: {data['len']} pts < Mean. Data likely corrupted.")
-        else:
-            print(f"    [PASSED]   {ctrl}: {data['len']} pts")
-            filtered_storage[ctrl] = data
-
-    if not filtered_storage: return {}
-
+    mean_len = np.mean([v['len'] for v in raw_storage.values()])
+    filtered_storage = {k: v for k, v in raw_storage.items() if v['len'] >= mean_len * 0.5} # Tolerance added
     min_len = int(min(v['len'] for v in filtered_storage.values()))
-    print(f"\n[*] Step 3: Time Trimming (Syncing to Global Min = {min_len} samples)")
+    
+    print(f"\n[*] Syncing Time Domain (Min Samples = {min_len})")
     
     comp_data = {}
     for ctrl, data in filtered_storage.items():
-        diff = data['len'] - min_len
-        if diff > 0:
-            print(f"    [-] {ctrl}: Clipping last {diff} samples.")
-            
         df = data['df'].iloc[:min_len].copy()
         df = df.ffill().bfill().reset_index(names='_log_time')
         
         tmap = build_topic_map(df)
         if tmap:
+            # Note: Converted to RADIANS to match the plotting backend requirements
             for ori in ['ref_ori', 'act_ori']:
                 prefix = ori.split('_')[0]
                 cols = [f"{tmap[ori]}.x", f"{tmap[ori]}.y", f"{tmap[ori]}.z", f"{tmap[ori]}.w"]
                 if all(c in df.columns for c in cols):
-                    e = R.from_quat(df[cols].to_numpy()).as_euler('xyz', degrees=True)
+                    e = R.from_quat(df[cols].to_numpy()).as_euler('xyz', degrees=False) 
                     df.loc[:, f'{prefix}_roll'] = e[:, 0]
                     df.loc[:, f'{prefix}_pitch'] = e[:, 1]
                     df.loc[:, f'{prefix}_yaw'] = e[:, 2]
@@ -118,161 +116,204 @@ def load_and_sync_data(base_dir, controllers, path_type):
     return comp_data
 
 # ==========================================
-# 4. Evaluation & Plotting
+# 3. Enhanced Visualization & Metrics
 # ==========================================
-ETA_GRID = [[('X (m)', 'act_pos_x', 'ref_pos_x'), ('Phi (deg)', 'act_roll', 'ref_roll')],
-            [('Y (m)', 'act_pos_y', 'ref_pos_y'), ('Theta (deg)', 'act_pitch', 'ref_pitch')],
-            [('Z (m)', 'act_pos_z', 'ref_pos_z'), ('Psi (deg)', 'act_yaw', 'ref_yaw')]]
-
-def calculate_metrics(data_dict, ctrl_name):
-    df, tmap = data_dict['df'], data_dict['tmap']
-    metrics = {'Controller': ctrl_name}
-    NU_GRID = [[('U (m/s)', 'act_u', 'cmd_u'), ('P (rad/s)', 'act_p', 'cmd_p')],
-               [('V (m/s)', 'act_v', 'cmd_v'), ('Q (rad/s)', 'act_q', 'cmd_q')],
-               [('W (m/s)', 'act_w', 'cmd_w'), ('R (rad/s)', 'act_r', 'cmd_r')]]
-    grid = [i for row in ETA_GRID+NU_GRID for i in row]
-    for name, ak, rk in grid:
-        # Resolve Columns Strictly
-        if any(x in ak for x in ['roll', 'pitch', 'yaw']):
-            ac, rc = f"act_{ak.split('_')[-1]}", f"ref_{ak.split('_')[-1]}"
-        else:
-            ac, rc = tmap.get(ak), tmap.get(rk)
-            
-        if ac in df.columns and rc in df.columns:
-            err = df[rc].to_numpy() - df[ac].to_numpy()
-            if 'deg' in name: err = wrap_angle_deg(err)
-            metrics[f'RMSE_{name}'] = np.sqrt(np.mean(err**2))
-            metrics[f'MAE_{name}'] = np.mean(np.abs(err))
-            metrics[f'MaxAE_{name}'] = np.max(np.abs(err))
-    return metrics
-
-def plot_eta_grid(comp_data, save_dir):
-    # ขนาดรูปภาพ 10x8
-    fig_resp, ax_resp = plt.subplots(3, 2, figsize=(10, 8))
-    fig_err, ax_err = plt.subplots(3, 2, figsize=(10, 8))
+def plot_journal_style(comp_data, save_dir=None):
+    labels = list(comp_data.keys())
+    num_histories = len(labels)
+    colors = cm.get_cmap('tab10')(np.linspace(0, 1, num_histories))
     
-    ctrl_list = list(comp_data.keys())
+    # Extract Base Time
+    base_ctrl = labels[0]
+    df_b = comp_data[base_ctrl]['df']
+    t_raw = df_b['_log_time'].values.astype(np.int64)
+    t = (t_raw - t_raw[0]) / 1e9
 
-    # บังคับชื่อแกนเป็น Greek + Degree Symbol (LaTeX)
-    labels = [
-        ['X [m]', r'$\phi$ [$^\circ$]'],
-        ['Y [m]', r'$\theta$ [$^\circ$]'],
-        ['Z [m]', r'$\psi$ [$^\circ$]']
-    ]
+    def get_arr(df, tmap, key):
+        return df[tmap[key]].values if key in tmap and tmap[key] in df.columns else np.zeros(len(df))
 
-    for ctrl, data in comp_data.items():
-        df, tmap = data['df'], data['tmap']
-        t_raw = df['_log_time'].values.astype(np.int64)
-        time = (t_raw - t_raw[0]) / 1e9
+    def get_arr_direct(df, key):
+        return df[key].values if key in df.columns else np.zeros(len(df))
+
+    def format_figure(fig, axs, bottom_margin):
+        handles, labels_l = axs[0, 0].get_legend_handles_labels()
+        fig.tight_layout(rect=[0, bottom_margin, 1, 0.96])
+        fig.legend(handles, labels_l, loc='upper center', ncol=3, bbox_to_anchor=(0.5, bottom_margin), 
+                   columnspacing=2.0, handletextpad=0.5, fontsize=9, frameon=True)
+
+    # Extract Reference Arrays from Base Controller
+    eta_ref = np.column_stack([get_arr(df_b, comp_data[base_ctrl]['tmap'], f'ref_pos_{x}') for x in ['x','y','z']] +
+                              [get_arr_direct(df_b, f'ref_{a}') for a in ['roll','pitch','yaw']])
+
+    # --- Fig 1: Position Tracking (Eta) ---
+    fig1, axs1 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
+    fig1.suptitle(r'Position Tracking ($\eta$)', fontsize=14, fontweight='bold')
+    labels_eta_lin = ['x [m]', 'y [m]', 'z [m]']
+    labels_eta_ang = [r'$\phi$ [deg]', r'$\theta$ [deg]', r'$\psi$ [deg]']
+
+    for i in range(3):
+        ref_ang_rad = np.unwrap(eta_ref[:, i+3]) if i == 2 else eta_ref[:, i+3]
+        axs1[i, 0].plot(t, eta_ref[:, i], 'k--', linewidth=2, label='Ref' if i==0 else "")
+        axs1[i, 1].plot(t, np.rad2deg(ref_ang_rad), 'k--', linewidth=2, label='Ref' if i==0 else "")
         
-        for r in range(3):
-            for c in range(2):
-                orig_name, ak, rk = ETA_GRID[r][c]
-                
-                if any(x in ak for x in ['roll', 'pitch', 'yaw']):
-                    ac, rc = f"act_{ak.split('_')[-1]}", f"ref_{ak.split('_')[-1]}"
-                else:
-                    ac, rc = tmap.get(ak), tmap.get(rk)
-                
-                if ac in df.columns:
-                    ax_resp[r, c].plot(time, df[ac], label=ctrl, linewidth=1.2, zorder=2)
-                    
-                    if rc in df.columns:
-                        err = df[rc].to_numpy() - df[ac].to_numpy()
-                        is_deg = 'deg' in orig_name or any(x in ak for x in ['roll', 'pitch', 'yaw'])
-                        ax_err[r, c].plot(time, wrap_angle_deg(err) if is_deg else err, 
-                                          label=ctrl, linewidth=1.2, zorder=2)
-                        
-                        if ctrl == ctrl_list[-1]:
-                            ax_resp[r, c].plot(time, df[rc], 'k--', label='reference', 
-                                              alpha=0.9, linewidth=1.5, zorder=10)
-                
-                display_name = labels[r][c]
-                ax_resp[r, c].set_title(display_name, fontsize=10, fontweight='bold')
-                ax_err[r, c].set_title(f"{display_name} Error", fontsize=10, fontweight='bold')
-                
-                # Physical Scaling
-                if 'Z [m]' in display_name:
-                    ax_resp[r, c].set_ylim(-1.0, 0.0)
-                elif any(sym in display_name for sym in [r'$\phi$', r'$\theta$']):
-                    ax_resp[r, c].set_ylim(-10, 10)
-                elif r'$\psi$' in display_name:
-                    ax_resp[r, c].set_ylim(-200, 200)
-                
-                ax_resp[r, c].legend(fontsize='x-small', loc='upper right')
-                ax_err[r, c].legend(fontsize='x-small', loc='upper right')
-                ax_resp[r, c].grid(True, linestyle=':', alpha=0.6)
-                ax_err[r, c].grid(True, linestyle=':', alpha=0.6)
+        for idx, ctrl in enumerate(labels):
+            df, tmap = comp_data[ctrl]['df'], comp_data[ctrl]['tmap']
+            pos = get_arr(df, tmap, f'act_pos_{["x","y","z"][i]}')
+            ang_rad = get_arr_direct(df, f'act_{["roll","pitch","yaw"][i]}')
+            state_ang_rad = np.unwrap(ang_rad) if i == 2 else ang_rad
+            
+            axs1[i, 0].plot(t, pos, color=colors[idx], label=ctrl if i==0 else "")
+            axs1[i, 1].plot(t, np.rad2deg(state_ang_rad), color=colors[idx], label=ctrl if i==0 else "")
+            
+        axs1[i, 0].set_ylabel(labels_eta_lin[i]); axs1[i, 0].grid(True, linestyle=':', alpha=0.7)
+        axs1[i, 1].set_ylabel(labels_eta_ang[i]); axs1[i, 1].grid(True, linestyle=':', alpha=0.7)
+        
+    axs1[2, 0].set_xlabel('Time [s]'); axs1[2, 1].set_xlabel('Time [s]')
+    format_figure(fig1, axs1, bottom_margin=0.11)
 
-    fig_resp.tight_layout(pad=1.5)
-    fig_err.tight_layout(pad=1.5)
-    fig_resp.savefig(save_dir / "eta_resp.svg")
-    fig_err.savefig(save_dir / "eta_err.svg")
-    plt.close('all')
+    # --- Fig 2 & 3: Velocity Tracking & Error (Nu) ---
+    fig2, axs2 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
+    fig2.suptitle(r'Velocity Tracking ($\nu$)', fontsize=14, fontweight='bold')
+    
+    fig3, axs3 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
+    fig3.suptitle(r'Velocity Tracking Error ($e_\nu$)', fontsize=14, fontweight='bold')
+    
+    labels_nu_lin, labels_nu_ang = ['u [m/s]', 'v [m/s]', 'w [m/s]'], ['p [deg/s]', 'q [deg/s]', 'r [deg/s]']
+    labels_enu_lin, labels_enu_ang = [r'$e_u$ [m/s]', r'$e_v$ [m/s]', r'$e_w$ [m/s]'], [r'$e_p$ [deg/s]', r'$e_q$ [deg/s]', r'$e_r$ [deg/s]']
 
-def plot_2d_path(comp_data, save_dir):
-    plt.figure(figsize=(10, 8))
-    for ctrl, data in comp_data.items():
-        df, tmap = data['df'], data['tmap']
-        act_x, act_y = tmap.get('act_pos_x'), tmap.get('act_pos_y')
-        ref_x, ref_y = tmap.get('ref_pos_x'), tmap.get('ref_pos_y')
-        if act_x in df.columns and act_y in df.columns:
-            plt.plot(df[act_x], df[act_y], label=ctrl)
-            if ctrl == list(comp_data.keys())[0] and ref_x in df.columns:
-                plt.plot(df[ref_x], df[ref_y], 'k--', label='Reference', alpha=0.6)
-    plt.title('2D Path Response (X-Y)', fontweight='bold'); plt.xlabel('X (m)'); plt.ylabel('Y (m)')
-    plt.legend(); plt.grid(True); plt.axis('equal'); plt.tight_layout()
-    plt.savefig(save_dir / "2d_path_response.svg"); plt.close()
+    lin_k, ang_k = ['u','v','w'], ['p','q','r']
+    
+    metrics_eta, metrics_nu = [], []
 
-def save_table_as_svg(df, title, filename, output_dir):
-    df_str = df.map(lambda x: "-" if pd.isna(x) else (f"{x:.4e}" if abs(x) < 0.001 and x != 0 else f"{x:.4f}"))
-    fig, ax = plt.subplots(figsize=(max(12, len(df.columns)*2), 2+len(df)*0.8)); ax.axis('off')
-    table = ax.table(cellText=df_str.values, rowLabels=df_str.index, colLabels=df_str.columns, cellLoc='center', loc='center')
-    table.auto_set_font_size(False); table.set_fontsize(10); table.scale(1.1, 2)
-    for (r, c), cell in table.get_celld().items():
-        if r == 0: cell.set_facecolor('#2C3E50'); cell.set_text_props(color='white', weight='bold')
-        elif c == -1: cell.set_facecolor('#ECF0F1'); cell.set_text_props(weight='bold')
-        elif r > 0 and c >= 0:
-            if df.iloc[r-1, c] == df.iloc[:, c].min():
-                cell.set_facecolor('#FADBD8'); cell.set_text_props(color='#C0392B', weight='bold')
-    plt.title(title, weight='bold', pad=30); plt.savefig(output_dir / filename, bbox_inches='tight'); plt.close()
+    for idx, ctrl in enumerate(labels):
+        df, tmap = comp_data[ctrl]['df'], comp_data[ctrl]['tmap']
+        
+        eta = np.column_stack([get_arr(df, tmap, f'act_pos_{x}') for x in ['x','y','z']] +
+                              [get_arr_direct(df, f'act_{a}') for a in ['roll','pitch','yaw']])
+        nu = np.column_stack([get_arr(df, tmap, f'act_{k}') for k in lin_k] + [get_arr(df, tmap, f'act_{k}') for k in ang_k])
+        nu_cmd = np.column_stack([get_arr(df, tmap, f'cmd_{k}') for k in lin_k] + [get_arr(df, tmap, f'cmd_{k}') for k in ang_k])
+
+        # Calc Metrics
+        e_lin = eta_ref[:, :3] - eta[:, :3]
+        e_ang_rad = (eta_ref[:, 3:6] - eta[:, 3:6] + np.pi) % (2 * np.pi) - np.pi
+        e_eta = np.hstack((e_lin, np.rad2deg(e_ang_rad)))
+        metrics_eta.append({'rmse': np.sqrt(np.mean(e_eta**2, axis=0)), 'mae': np.mean(np.abs(e_eta), axis=0), 'maxae': np.max(np.abs(e_eta), axis=0)})
+        
+        e_nu = np.hstack((nu_cmd[:, :3] - nu[:, :3], np.rad2deg(nu_cmd[:, 3:6] - nu[:, 3:6])))
+        metrics_nu.append({'rmse': np.sqrt(np.mean(e_nu**2, axis=0)), 'mae': np.mean(np.abs(e_nu), axis=0), 'maxae': np.max(np.abs(e_nu), axis=0)})
+
+        for i in range(3):
+            # Nu Plotting
+            axs2[i, 0].plot(t, nu_cmd[:, i], '--', color=colors[idx], alpha=0.4, label=f'{ctrl} (Cmd)' if i==0 else "")
+            axs2[i, 0].plot(t, nu[:, i], '-', color=colors[idx], label=ctrl if i==0 else "")
+            axs2[i, 1].plot(t, np.rad2deg(nu_cmd[:, i+3]), '--', color=colors[idx], alpha=0.4)
+            axs2[i, 1].plot(t, np.rad2deg(nu[:, i+3]), '-', color=colors[idx])
+            
+            # Nu Error Plotting
+            axs3[i, 0].plot(t, nu_cmd[:, i] - nu[:, i], color=colors[idx], label=ctrl if i==0 else "")
+            axs3[i, 1].plot(t, np.rad2deg(nu_cmd[:, i+3] - nu[:, i+3]), color=colors[idx], label=ctrl if i==0 else "")
+            
+    for i in range(3):
+        axs2[i, 0].set_ylabel(labels_nu_lin[i]); axs2[i, 0].grid(True, linestyle=':', alpha=0.7)
+        axs2[i, 1].set_ylabel(labels_nu_ang[i]); axs2[i, 1].grid(True, linestyle=':', alpha=0.7)
+        axs3[i, 0].set_ylabel(labels_enu_lin[i]); axs3[i, 0].grid(True, linestyle=':', alpha=0.7)
+        axs3[i, 1].set_ylabel(labels_enu_ang[i]); axs3[i, 1].grid(True, linestyle=':', alpha=0.7)
+
+    axs2[2, 0].set_xlabel('Time [s]'); axs2[2, 1].set_xlabel('Time [s]')
+    axs3[2, 0].set_xlabel('Time [s]'); axs3[2, 1].set_xlabel('Time [s]')
+    format_figure(fig2, axs2, bottom_margin=0.18)
+    format_figure(fig3, axs3, bottom_margin=0.13)
+
+    # --- Fig 4: Generalized Torque (Tau) ---
+    fig4, axs4 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
+    fig4.suptitle(r'Generalized Torque ($\tau$)', fontsize=14, fontweight='bold')
+    labels_tau_f, labels_tau_t = ['X [N]', 'Y [N]', 'Z [N]'], ['K [Nm]', 'M [Nm]', 'N [Nm]']
+
+    tau_k_lin, tau_k_ang = ['x','y','z'], ['k','m','n']
+    for idx, ctrl in enumerate(labels):
+        df, tmap = comp_data[ctrl]['df'], comp_data[ctrl]['tmap']
+        for i in range(3):
+            axs4[i, 0].plot(t, get_arr(df, tmap, f'tau_{tau_k_lin[i]}'), color=colors[idx], label=ctrl if i==0 else "")
+            axs4[i, 1].plot(t, get_arr(df, tmap, f'tau_{tau_k_ang[i]}'), color=colors[idx])
+
+    for i in range(3):
+        axs4[i, 0].set_ylabel(labels_tau_f[i]); axs4[i, 0].grid(True, linestyle=':', alpha=0.7)
+        axs4[i, 1].set_ylabel(labels_tau_t[i]); axs4[i, 1].grid(True, linestyle=':', alpha=0.7)
+        
+    axs4[2, 0].set_xlabel('Time [s]'); axs4[2, 1].set_xlabel('Time [s]')
+    format_figure(fig4, axs4, bottom_margin=0.11)
+
+    # --- Fig 5: 3D Path Tracking ---
+    fig5 = plt.figure(figsize=(10, 10))
+    ax5 = fig5.add_subplot(111, projection='3d')
+    ax5.plot(eta_ref[:, 0], eta_ref[:, 1], eta_ref[:, 2], 'k--', linewidth=2, label='Reference')
+    
+    for idx, ctrl in enumerate(labels):
+        df, tmap = comp_data[ctrl]['df'], comp_data[ctrl]['tmap']
+        ax5.plot(get_arr(df, tmap, 'act_pos_x'), get_arr(df, tmap, 'act_pos_y'), get_arr(df, tmap, 'act_pos_z'), 
+                 color=colors[idx], label=ctrl)
+        
+    ax5.set_xlabel('x [m]'); ax5.set_ylabel('y [m]'); ax5.set_zlabel('z [m]')
+    ax5.set_title('3D Path Tracking Comparison', fontsize=14, fontweight='bold', pad=20)
+    handles5, labels5 = ax5.get_legend_handles_labels()
+    fig5.tight_layout(rect=[0, 0.11, 1, 1])
+    fig5.legend(handles5, labels5, loc='upper center', ncol=3, bbox_to_anchor=(0.5, 0.11), columnspacing=2.0, fontsize=10, frameon=True)
+
+    # --- Fig 6 & 7: Metric Tables ---
+    def create_metric_figure(title_main, cols, metrics_data):
+        fig, axs = plt.subplots(3, 1, figsize=(14, 8))
+        fig.suptitle(title_main, fontweight='bold', fontsize=14)
+        metric_keys, metric_titles = ['rmse', 'mae', 'maxae'], ['RMSE', 'MAE', 'MaxAE']
+        colors_bg, highlight_color, highlight_text_color = ['#d9ead3', '#cfe2f3', '#f4cccc'], '#fff2cc', '#d62728'
+        for i, key in enumerate(metric_keys):
+            cell_text = [[f"{m[key][col_idx]:.4f}" for col_idx in range(6)] for m in metrics_data]
+            tbl = axs[i].table(cellText=cell_text, rowLabels=labels, colLabels=cols, loc='center', cellLoc='center', 
+                               rowColours=['#f2f2f2']*len(labels), colColours=[colors_bg[i]]*6)
+            for col_idx in range(6):
+                col_vals = [m[key][col_idx] for m in metrics_data]
+                min_idx = np.argmin(col_vals)
+                best_cell = tbl[min_idx + 1, col_idx]
+                best_cell.set_facecolor(highlight_color)
+                best_cell.get_text().set_weight('bold')
+                best_cell.get_text().set_color(highlight_text_color)
+            tbl.scale(1, 1.8); tbl.set_fontsize(11); axs[i].axis('off')
+            axs[i].set_title(metric_titles[i], pad=5, fontweight='bold')
+        fig.tight_layout()
+        return fig
+
+    fig6 = create_metric_figure(r'$\eta$ Error Metrics', ['x [m]', 'y [m]', 'z [m]', r'$\phi$ [deg]', r'$\theta$ [deg]', r'$\psi$ [deg]'], metrics_eta)
+    fig7 = create_metric_figure(r'$\nu$ Error Metrics', ['u [m/s]', 'v [m/s]', 'w [m/s]', 'p [deg/s]', 'q [deg/s]', 'r [deg/s]'], metrics_nu)
+
+    # --- File Export ---
+    if save_dir is not None:
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        figs = [fig1, fig2, fig3, fig4, fig5, fig6, fig7]
+        names = ["1_kinematics", "2_dynamics", "3_dynamics_error", "4_control_effort", "5_3d_path", "6_table_kinematics_metrics", "7_table_dynamics_metrics"]
+        for f, name in zip(figs, names):
+            f.savefig(save_path / f"{name}.svg", format='svg', bbox_inches='tight')
+        plt.close('all') 
+    else: 
+        plt.show()
 
 # ==========================================
-# 5. Main Execution
+# 4. Main Execution
 # ==========================================
 if __name__ == "__main__":
-    BASE_DIR = "~/Desktop/test_result/journal/pool"
-    # BASE_DIR = "/home/tanbjs/Desktop/test_result/journal/gazebo/pose_gt/without_oc"
+    BASE_DIR = "/home/tanbjs/Desktop/test_result/journal/pool2_report"
     POOL_DIR = Path(BASE_DIR).expanduser()
-    RESULT_DIR = POOL_DIR / "result"; RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    RESULT_DIR = POOL_DIR / "result"
     
     CONTROLLERS = [
-                "pid-pid", 
-                "pi_dmdc_lqt_without_preview",
-                "pi_dmdc_lqt_with_preview",
-                "pi_dmdc_mpc_without_preview", 
-                "pi_dmdc_mpc_with_preview", 
-                "pi_edmdc_lqt_without_preview",
-                "pi_edmdc_lqt_with_preview",
-                "pi_edmdc_mpc_without_preview", 
-                "pi_edmdc_mpc_with_preview"]
+        "pid_pi",
+        "ffpi_dmdc_constrained_intergral_mpc_with_preview",
+        "ffpi_edmdc_constrained_intergral_mpc_with_preview"           
+    ]
     TARGET_PATH = "figure8"
 
     comp_data = load_and_sync_data(POOL_DIR, CONTROLLERS, TARGET_PATH)
     
     if comp_data:
-        print("\n[*] Step 4: Generating Comparison Plots (Size 10x8)...")
-        plot_2d_path(comp_data, RESULT_DIR)
-        plot_eta_grid(comp_data, RESULT_DIR)
-        
-        print("\n[*] Step 5: Calculating Metrics and Tables...")
-        metrics = [calculate_metrics(d, c) for c, d in comp_data.items()]
-        for m_type in ["RMSE", "MaxAE", "MAE"]:
-            for group, cols in [("Eta", ['X (m)', 'Y (m)', 'Z (m)', 'Phi (deg)', 'Theta (deg)', 'Psi (deg)']), 
-                               ("Nu", ['U (m/s)', 'V (m/s)', 'W (m/s)', 'P (rad/s)', 'Q (rad/s)', 'R (rad/s)'])]:
-                table_data = {mt['Controller']: {c: mt.get(f'{m_type}_{c}', np.nan) for c in cols} for mt in metrics}
-                df_table = pd.DataFrame.from_dict(table_data, orient='index').dropna(axis=1, how='all')
-                if not df_table.empty:
-                    save_table_as_svg(df_table, f"{m_type} - {group}", f"table_{m_type.lower()}_{group.lower()}.svg", RESULT_DIR)
-        
-        print(f"\n[Success] Processed. Results in: {RESULT_DIR}")
+        print("\n[*] Generating Journal Style Plots & Metrics...")
+        plot_journal_style(comp_data, save_dir=RESULT_DIR)
+        print(f"\n[Success] All graphs & tables exported to: {RESULT_DIR}")
