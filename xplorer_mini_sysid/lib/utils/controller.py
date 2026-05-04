@@ -98,7 +98,8 @@ def create_velocity_controller(model: Wrapper = None,
                     return mpc.IncrementalOutputForm(model, mpc_params, node_name=node_name, use_preview=use_preview, logger=logger)
             if 'integral' in ctrl_type:
                 if mode == 'state_form':
-                    return mpc.ConstrainedIntegralStateForm(model, mpc_params, node_name=node_name, use_preview=use_preview, logger=logger)
+                    int_limit = safe_array(params.get('int_limit'))
+                    return mpc.ConstrainedIntegralStateForm(model, mpc_params, node_name=node_name, use_preview=use_preview, dt=dt, int_limit=int_limit, logger=logger)
                 elif mode == 'output_form':
                     raise NotImplementedError("Integral Output Form MPC is not implemented yet.")
             else:
