@@ -6,8 +6,6 @@ from .model import LinearModel, KoopmanModel
 
 
 class BaseKMC(ABC):
-    model: KoopmanModel
-
     def __init__(self, 
                  model_wrapper: DMDcWrapper | EDMDcWrapper | DeepModelWrapper):
         self.model = self.__get_model(model_wrapper)
