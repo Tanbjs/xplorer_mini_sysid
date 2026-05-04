@@ -1,0 +1,43 @@
+# ==================================================================
+/**: # This will put all the parameters in every node
+  ros__parameters:
+    uuv_name: 'xplorer_mini'
+
+    model_name: 'edmdc'
+    model_version: 1
+
+    # ------------------------ PI + standard K-MPC gains -------------------
+    position_controller: 
+      type: 'ff_pi'
+      use_filter: true
+      use_feedforward: true
+      params:
+        kp: [0.5, 0.5, 1.0, 1.1, 1.31, 1.0]
+        ki: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
+        int_limit: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]          # Integral windup limits for each DOF
+        sat_bound: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]             # Saturation limits velocity for the PI controller output
+
+    velocity_controller: 
+      type: 'mpc_standard'
+      mode: 'state_form'
+      use_constraints: true
+      use_preview: false
+      params:
+        N_horizon: 10
+
+        # Cost function weights
+        # Trial and error
+        Q: [100.0, 250.0, 50.0, 50.0, 50.0, 100.0]        
+        R_abs: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]    
+
+        # PSO Optimized
+        # Q: [471692.17, 26010.53, 1178.98, 185644.37, 44220.24, 240978.08]
+        # R_abs: [0.28, 0.75, 0.78, 0.87, 0.59, 0.9]
+        
+        # Constraints
+        # y_min: [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0]                 # Min velocity limits for each DOF 
+        # y_max: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]                       # Max velocity limits for each DOF 
+        u_min: [-136.3905, -78.7474, -138.0776, -31.4990, -46.0672, -12.8516]     # Min control input limits for each DOF
+        u_max: [136.3905, 78.7474, 138.0776, 31.4990, 46.0672, 12.8516]           # Max control input limits for each DOF
+
+

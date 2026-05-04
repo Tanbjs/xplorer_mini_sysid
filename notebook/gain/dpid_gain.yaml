@@ -1,0 +1,44 @@
+/**: # This will put all the parameters in every node
+  ros__parameters:
+    uuv_name: 'xplorer_mini'
+    
+    model_name: 'dmdc'
+    model_version: 1
+
+    # Position Loop PID Gains
+    position_controller:
+      type: 'pid'
+      use_filter: false                                   # filter reference for derivative term
+      use_feedforward: false                              # use feedforward term 
+      params:
+        kp: [1.5, 1.5, 1.5, 1.1, 1.1, 1.5]
+        ki: [0.021, 0.036, 0.01, 0.36, 0.43, 0.05]
+        kd: [0.01, 0.015, 0.03, 0.015, 0.0, 0.0]
+        # kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+        # P'J tuning
+        # kp: [0.2, 1.2, 0.7, 1.1, 1.31, 1.5]
+        # ki: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
+        # kd: [0.01, 0.015, 0.03, 0.015, 0.0, 0.0]
+
+        # int_limit: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]               # Integral windup limits for each DOF
+        sat_bound: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]                 # Saturation limits velocity for the PI controller output
+
+    # Velocity Loop PID Gains
+    velocity_controller:
+      type: 'pid'
+      params:
+        kp: [5.5, 5.5, 3.5, 1.7, 3.0, 5.0]
+        # ki: [0.0, 0.0, 0.0, 0.0, 0.0, 0.05]
+        # ki: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
+        ki: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+        # P'J tuning
+        # kp: [4.0, 2.5, 1.5, 1.7, 3.0, 1.0]
+        # ki: [0.0, 0.0, 0.0, 0.0, 0.0, 0.05]
+        # kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+        # int_limit: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]                                   # Integral windup limits for each DOF
+        sat_bound: [136.3905, 78.7474, 138.0776, 31.4990, 46.0672, 12.8516]           # Saturation limits velocity for the PI controller output
+    

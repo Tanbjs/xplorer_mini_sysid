@@ -1,0 +1,40 @@
+# ==================================================================
+/**: # This will put all the parameters in every node
+  ros__parameters:
+    uuv_name: 'xplorer_mini'
+
+    model_name: 'dmdc'
+    model_version: 1
+
+    # ------------------------ PI + standard K-MPC gains -------------------
+    position_controller: 
+      type: 'ff_pi'
+      use_filter: false
+      use_feedforward: true
+      params:
+        kp: [0.5, 0.5, 0.5, 1.1, 1.31, 1.0]
+        ki: [0.021, 0.036, 0.005, 0.36, 0.43, 0.05]
+        # int_limit: [10.0, 10.0, 10.0, 1.0, 1.0, 1.0]          # Integral windup limits for each DOF
+        # sat_bound: [0.5, 0.5, 0.5, 1.0, 1.0, 1.0]             # Saturation limits velocity for the PI controller output
+
+    velocity_controller: 
+      type: 'mpc_standard'
+      mode: 'state_form'
+      use_constraints: false
+      use_preview: false
+      params:
+        N_horizon: 10
+
+        # Cost function weights
+        # Trial and error tuning
+        Q: [50.0, 100.0, 50.0, 50.0, 50.0, 100.0]              
+        R_abs: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]    
+
+        # PSO Optimized
+        # Q: [471692.17, 26010.53, 1178.98, 185644.37, 44220.24, 240978.08]
+        # R_abs: [0.28, 0.75, 0.78, 0.87, 0.59, 0.9]
+
+        # Rigid body mass * kp of pid
+        # Q: [220.0, 302.5, 82.5, 8.16, 18.90, 2.11]               # State error penalty weights
+        # R_abs: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]             # Penalty on absolute control input 
+
