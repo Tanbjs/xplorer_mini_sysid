@@ -105,15 +105,6 @@ class CascadeKoopmanControl(Node):
         self.pose_ct_virtual: PositionControllerType =  create_position_controller(**self.get_parameters_by_prefix('position_controller'))
 
         # Velocity controller
-        
-        # load Koopman model from MLflow based on parameters
-        model_name_str = str(self.get_parameter('model_name').value)
-        model_version_str = str(self.get_parameter('model_version').value)
-        self.wrapper: Wrapper = load_model(client=self.mlflow_client, 
-                                        name=model_name_str, 
-                                        version=model_version_str)
-        
-        # velocity controller type
         self.vel_ctrl_type = self.get_parameter('velocity_controller.type').get_parameter_value().string_value
 
         if self.vel_ctrl_type == 'pid':
@@ -121,7 +112,13 @@ class CascadeKoopmanControl(Node):
                                                      **self.get_parameters_by_prefix('velocity_controller'))
             self.is_vel_ready = True
             self.get_logger().info("PID velocity controller selected, no model needed.")
-        else: 
+
+        elif 'mpc' in self.vel_ctrl_type: 
+            model_name = str(self.get_parameter('model_name').value)
+            model_version = str(self.get_parameter('model_version').value)
+            self.wrapper: Wrapper = load_model(client=self.mlflow_client, 
+                                            name=model_name, 
+                                            version=model_version)
             self.use_preview = self.get_parameter('velocity_controller.use_preview').get_parameter_value().bool_value
             self.vel_ct: VelocityControllerType = create_velocity_controller(model=self.wrapper, 
                                                                             dt=self.dt,
@@ -263,7 +260,8 @@ class CascadeKoopmanControl(Node):
         publisher.publish(msg)
 
     def on_parameter_update(self, params):
-
+        
+        self.get_logger().info(f"{'='*20} PARAMETER UPDATE RECEIVED {'='*20}")
         for param in params:
             param_name = param.name
             
