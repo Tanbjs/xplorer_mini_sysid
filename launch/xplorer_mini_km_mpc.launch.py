@@ -9,7 +9,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     
-    model = 'edmdc'                 # 'dmdc' or 'edmdc'
+    model = 'dmdc'                 # 'dmdc' or 'edmdc'
     pose_controller = 'ffpi'        # 'ffpi' or 'pi'
     vel_controller = 'intmpc'       # 'pid' or 'kmpc' (model-based MPC)
     constrained = True              # Whether to use constrained MPC (only for kmpc)
