@@ -1,14 +1,14 @@
 import os
-from matplotlib import cm
 import mlflow
 import yaml
 from pathlib import Path
 import numpy as np
 import warnings
 import urllib3
+from matplotlib import cm
 import matplotlib.pyplot as plt
 
-from xplorer_mini_guidance.utils.path_gen import figure8_path, circle_path
+from xplorer_mini_guidance.utils.path_gen import figure8_path, circle_path, zigzag_path
 from xplorer_mini_python_utils.kinematics import eulerang, gvect, m2c
 
 from xplorer_mini_sysid.lib.utils.mlflow import load_model
@@ -83,17 +83,94 @@ def rk4_step(sys, x, u, dt):
     return x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
 def plot_response(histories, labels, eta_ref_full, save_dir=None):
-    num_histories = len(histories)
-    colors = cm.get_cmap('tab10')(np.linspace(0, 1, num_histories))
-    
+
+    # ================= Data Sorting & Q1 Paper Colors =================
+    def get_config(lbl):
+        lbl_lower = str(lbl).lower()
+
+        # 1. Controller Priority: pid (0), nominal (1), offset-free (2)
+        if 'pid' in lbl_lower: ctrl_p = 0
+        elif 'nominal' in lbl_lower: ctrl_p = 1
+        elif 'offset-free' in lbl_lower: ctrl_p = 2
+        else: ctrl_p = 3
+
+        # 2. Model Priority: dmdc (0), edmdc (1)
+        if 'edmdc' in lbl_lower: mod_p = 1
+        elif 'dmdc' in lbl_lower: mod_p = 0
+        else: mod_p = 2
+
+        # 3. Preview Priority: without (0), with (1)
+        if 'with preview' in lbl_lower: prev_p = 1
+        else: prev_p = 0
+
+        keys = (ctrl_p, mod_p, prev_p)
+
+        # ---- Color (Cool bright · paired by preview) ----
+        # without preview = light shade, with preview = deeper shade (still soft cool)
+        if ctrl_p == 0:
+            color = '#758A93'      # Soft gray (PID baseline)
+        elif ctrl_p == 1 and mod_p == 0 and prev_p == 0:
+            color = '#7FCBC4'      # Light teal     (Nominal, DMDc, w/o)
+        elif ctrl_p == 1 and mod_p == 0 and prev_p == 1:
+            color = '#2A9D8F'      # Deeper teal    (Nominal, DMDc, w/)
+        elif ctrl_p == 1 and mod_p == 1 and prev_p == 0:
+            color = '#8FB8DE'      # Light sky blue (Nominal, eDMDc, w/o)
+        elif ctrl_p == 1 and mod_p == 1 and prev_p == 1:
+            color = '#3A78B8'      # Deeper blue    (Nominal, eDMDc, w/)
+        elif ctrl_p == 2 and mod_p == 0 and prev_p == 0:
+            color = '#CC6B5C'      # Light red       (Offset-Free, DMDc, w/o)
+        elif ctrl_p == 2 and mod_p == 0 and prev_p == 1:
+            color = '#C5172E'      # Soft terracotta (Offset-Free, DMDc, w/) C5172E C0392B
+        elif ctrl_p == 2 and mod_p == 1 and prev_p == 0:
+            color = '#D9A055'      # Light orange    (Offset-Free, eDMDc, w/o)
+        elif ctrl_p == 2 and mod_p == 1 and prev_p == 1:
+            color = '#FF7444'      # Soft amber      (Offset-Free, eDMDc, w/)
+        else:
+            color = '#B0B0B0'      # Gray fallback
+
+        # ---- Line style (all solid; preview distinguished by line width) ----
+        linestyle = '-'
+
+        # ---- Line width (PID slightly thicker as baseline; others uniform) ----
+        linewidth = 2.0 if ctrl_p == 0 else 1.5
+
+        return keys, color, linestyle, linewidth
+
+    # Sort by (Controller -> Model -> Preview)
+    sorted_data = sorted(zip(labels, histories), key=lambda x: get_config(x[0])[0])
+    labels = [x[0] for x in sorted_data]
+    histories = [x[1] for x in sorted_data]
+
+    # Locked style per label
+    styles = [get_config(lbl) for lbl in labels]
+    colors     = [s[1] for s in styles]
+    linestyles = [s[2] for s in styles]
+    linewidths = [s[3] for s in styles]
+    # =================================================================
+
     t = np.array(histories[0]['t'])
     eta_ref = eta_ref_full[:len(t), :]
 
-    def format_figure(fig, axs, bottom_margin):
-        handles, labels_l = axs[0, 0].get_legend_handles_labels()
-        fig.tight_layout(rect=[0, bottom_margin, 1, 0.96])
-        fig.legend(handles, labels_l, loc='upper center', ncol=3, bbox_to_anchor=(0.5, bottom_margin), columnspacing=2.0, handletextpad=0.5, fontsize=9, frameon=True)
+    # Optimization: Convert all data to numpy arrays once to reduce CPU overhead
+    for h in histories:
+        if not isinstance(h['x'], np.ndarray):
+            h['x'] = np.array(h['x'])
+        if 'nu_cmd_b' in h and not isinstance(h['nu_cmd_b'], np.ndarray):
+            h['nu_cmd_b'] = np.array(h['nu_cmd_b'])
+        if 'tau' in h and not isinstance(h['tau'], np.ndarray):
+            h['tau'] = np.array(h['tau'])
 
+    def format_figure(fig, axs, bottom_margin):
+        # Align y-labels vertically
+        fig.align_ylabels(axs)
+
+        handles, labels_l = axs[0, 0].get_legend_handles_labels()
+        fig.tight_layout(rect=[0.02, bottom_margin, 1, 0.96])
+        fig.legend(handles, labels_l, loc='upper center', ncol=3,
+                   bbox_to_anchor=(0.5, bottom_margin), columnspacing=2.0,
+                   handletextpad=0.5, fontsize=9, frameon=True)
+
+    # ================= Figure 1: Position Response =================
     fig1, axs1 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
     fig1.suptitle(r'Position Tracking ($\eta$)', fontsize=14, fontweight='bold')
     labels_eta_lin = ['x [m]', 'y [m]', 'z [m]']
@@ -101,136 +178,199 @@ def plot_response(histories, labels, eta_ref_full, save_dir=None):
 
     for i in range(3):
         ref_ang_rad = np.unwrap(eta_ref[:, i+3]) if i == 2 else eta_ref[:, i+3]
-        axs1[i, 0].plot(t, eta_ref[:, i], 'k--', linewidth=2, label='Ref' if i==0 else "")
-        axs1[i, 1].plot(t, np.rad2deg(ref_ang_rad), 'k--', linewidth=2, label='Ref' if i==0 else "")
-        
+        axs1[i, 0].plot(t, eta_ref[:, i], 'k--', linewidth=2, label='Ref' if i == 0 else "")
+        axs1[i, 1].plot(t, np.rad2deg(ref_ang_rad), 'k--', linewidth=2, label='Ref' if i == 0 else "")
+
         for idx, history in enumerate(histories):
-            eta = np.array(history['x'])[:, 0:6]
+            eta = history['x'][:, 0:6]
             state_ang_rad = np.unwrap(eta[:, i+3]) if i == 2 else eta[:, i+3]
-            
-            axs1[i, 0].plot(t, eta[:, i], color=colors[idx], label=labels[idx] if i==0 else "")
-            axs1[i, 1].plot(t, np.rad2deg(state_ang_rad), color=colors[idx], label=labels[idx] if i==0 else "")
-            
+
+            axs1[i, 0].plot(t, eta[:, i],
+                            color=colors[idx], linestyle=linestyles[idx], linewidth=linewidths[idx],
+                            label=labels[idx] if i == 0 else "")
+            axs1[i, 1].plot(t, np.rad2deg(state_ang_rad),
+                            color=colors[idx], linestyle=linestyles[idx], linewidth=linewidths[idx],
+                            label=labels[idx] if i == 0 else "")
+
         axs1[i, 0].set_ylabel(labels_eta_lin[i])
         axs1[i, 0].grid(True, linestyle=':', alpha=0.7)
         axs1[i, 1].set_ylabel(labels_eta_ang[i])
         axs1[i, 1].grid(True, linestyle=':', alpha=0.7)
-        
+
     axs1[2, 0].set_xlabel('Time [s]')
     axs1[2, 1].set_xlabel('Time [s]')
     format_figure(fig1, axs1, bottom_margin=0.11)
 
+    # ================= Figure 2: Position Tracking Error =================
     fig2, axs2 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
-    fig2.suptitle(r'Velocity Tracking ($\nu$)', fontsize=14, fontweight='bold')
+    fig2.suptitle(r'Position Tracking Error ($e_\eta$)', fontsize=14, fontweight='bold')
+    labels_eeta_lin = [r'$e_x$ [m]', r'$e_y$ [m]', r'$e_z$ [m]']
+    labels_eeta_ang = [r'$e_\phi$ [deg]', r'$e_\theta$ [deg]', r'$e_\psi$ [deg]']
+
+    for i in range(3):
+        for idx, history in enumerate(histories):
+            eta = history['x'][:, 0:6]
+
+            e_lin = eta_ref[:, i] - eta[:, i]
+            # Shortest angular difference preventing wrap-around artifacts
+            e_ang_rad = (eta_ref[:, i+3] - eta[:, i+3] + np.pi) % (2 * np.pi) - np.pi
+
+            axs2[i, 0].plot(t, e_lin,
+                            color=colors[idx], linestyle=linestyles[idx], linewidth=linewidths[idx],
+                            label=labels[idx] if i == 0 else "")
+            axs2[i, 1].plot(t, np.rad2deg(e_ang_rad),
+                            color=colors[idx], linestyle=linestyles[idx], linewidth=linewidths[idx],
+                            label=labels[idx] if i == 0 else "")
+
+        axs2[i, 0].set_ylabel(labels_eeta_lin[i])
+        axs2[i, 0].grid(True, linestyle=':', alpha=0.7)
+        axs2[i, 1].set_ylabel(labels_eeta_ang[i])
+        axs2[i, 1].grid(True, linestyle=':', alpha=0.7)
+
+    axs2[2, 0].set_xlabel('Time [s]')
+    axs2[2, 1].set_xlabel('Time [s]')
+    format_figure(fig2, axs2, bottom_margin=0.13)
+
+    # ================= Figure 3: Velocity Response =================
+    fig3, axs3 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
+    fig3.suptitle(r'Velocity Tracking ($\nu$)', fontsize=14, fontweight='bold')
     labels_nu_lin = ['u [m/s]', 'v [m/s]', 'w [m/s]']
     labels_nu_ang = ['p [deg/s]', 'q [deg/s]', 'r [deg/s]']
 
     for i in range(3):
         for idx, history in enumerate(histories):
-            nu = np.array(history['x'])[:, 6:12]
-            nu_cmd = np.array(history['nu_cmd_b'])
-            
+            nu = history['x'][:, 6:12]
+            nu_cmd = history['nu_cmd_b']
+
             nu_deg = nu.copy()
             nu_deg[:, 3:6] = np.rad2deg(nu_deg[:, 3:6])
             nu_cmd_deg = nu_cmd.copy()
             nu_cmd_deg[:, 3:6] = np.rad2deg(nu_cmd_deg[:, 3:6])
-            
-            axs2[i, 0].plot(t, nu_cmd[:, i], '--', color=colors[idx], alpha=0.4, label=f'{labels[idx]} (Cmd)' if i==0 else "")
-            axs2[i, 0].plot(t, nu[:, i], '-', color=colors[idx], label=labels[idx] if i==0 else "")
-            axs2[i, 1].plot(t, nu_cmd_deg[:, i+3], '--', color=colors[idx], alpha=0.4)
-            axs2[i, 1].plot(t, nu_deg[:, i+3], '-', color=colors[idx])
-            
-        axs2[i, 0].set_ylabel(labels_nu_lin[i])
-        axs2[i, 0].grid(True, linestyle=':', alpha=0.7)
-        axs2[i, 1].set_ylabel(labels_nu_ang[i])
-        axs2[i, 1].grid(True, linestyle=':', alpha=0.7)
 
-    axs2[2, 0].set_xlabel('Time [s]')
-    axs2[2, 1].set_xlabel('Time [s]')
-    format_figure(fig2, axs2, bottom_margin=0.18)
+            # Command: lighter / dotted, Actual: solid|dashed per preview
+            axs3[i, 0].plot(t, nu_cmd[:, i],
+                            color=colors[idx], linestyle='--', linewidth=1.0, alpha=0.5,
+                            label=f'{labels[idx]} (Cmd)' if i == 0 else "")
+            axs3[i, 0].plot(t, nu[:, i],
+                            color=colors[idx], linestyle=linestyles[idx], linewidth=linewidths[idx],
+                            label=labels[idx] if i == 0 else "")
+            axs3[i, 1].plot(t, nu_cmd_deg[:, i+3],
+                            color=colors[idx], linestyle='--', linewidth=1.0, alpha=0.5)
+            axs3[i, 1].plot(t, nu_deg[:, i+3],
+                            color=colors[idx], linestyle=linestyles[idx], linewidth=linewidths[idx])
 
-    fig3, axs3 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
-    fig3.suptitle(r'Velocity Tracking Error ($e_\nu$)', fontsize=14, fontweight='bold')
+        axs3[i, 0].set_ylabel(labels_nu_lin[i])
+        axs3[i, 0].grid(True, linestyle=':', alpha=0.7)
+        axs3[i, 1].set_ylabel(labels_nu_ang[i])
+        axs3[i, 1].grid(True, linestyle=':', alpha=0.7)
+
+    axs3[2, 0].set_xlabel('Time [s]')
+    axs3[2, 1].set_xlabel('Time [s]')
+    format_figure(fig3, axs3, bottom_margin=0.18)
+
+    # ================= Figure 4: Velocity Error =================
+    fig4, axs4 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
+    fig4.suptitle(r'Velocity Tracking Error ($e_\nu$)', fontsize=14, fontweight='bold')
     labels_enu_lin = [r'$e_u$ [m/s]', r'$e_v$ [m/s]', r'$e_w$ [m/s]']
     labels_enu_ang = [r'$e_p$ [deg/s]', r'$e_q$ [deg/s]', r'$e_r$ [deg/s]']
 
     for i in range(3):
         for idx, history in enumerate(histories):
-            nu = np.array(history['x'])[:, 6:12]
-            nu_cmd = np.array(history['nu_cmd_b'])
+            nu = history['x'][:, 6:12]
+            nu_cmd = history['nu_cmd_b']
             e_nu_lin = nu_cmd[:, i] - nu[:, i]
             e_nu_ang = np.rad2deg(nu_cmd[:, i+3] - nu[:, i+3])
-            
-            axs3[i, 0].plot(t, e_nu_lin, color=colors[idx], label=labels[idx] if i==0 else "")
-            axs3[i, 1].plot(t, e_nu_ang, color=colors[idx], label=labels[idx] if i==0 else "")
-            
-        axs3[i, 0].set_ylabel(labels_enu_lin[i])
-        axs3[i, 0].grid(True, linestyle=':', alpha=0.7)
-        axs3[i, 1].set_ylabel(labels_enu_ang[i])
-        axs3[i, 1].grid(True, linestyle=':', alpha=0.7)
 
-    axs3[2, 0].set_xlabel('Time [s]')
-    axs3[2, 1].set_xlabel('Time [s]')
-    format_figure(fig3, axs3, bottom_margin=0.13)
+            axs4[i, 0].plot(t, e_nu_lin,
+                            color=colors[idx], linestyle=linestyles[idx], linewidth=linewidths[idx],
+                            label=labels[idx] if i == 0 else "")
+            axs4[i, 1].plot(t, e_nu_ang,
+                            color=colors[idx], linestyle=linestyles[idx], linewidth=linewidths[idx],
+                            label=labels[idx] if i == 0 else "")
 
-    fig4, axs4 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
-    fig4.suptitle(r'Generalized Torque ($\tau$)', fontsize=14, fontweight='bold')
-    labels_tau_f, labels_tau_t = ['X [N]', 'Y [N]', 'Z [N]'], ['K [Nm]', 'M [Nm]', 'N [Nm]']
-
-    for i in range(3):
-        for idx, history in enumerate(histories):
-            tau = np.array(history['tau'])
-            axs4[i, 0].plot(t, tau[:, i], color=colors[idx], label=labels[idx] if i==0 else "")
-            axs4[i, 1].plot(t, tau[:, i+3], color=colors[idx])
-            
-        axs4[i, 0].set_ylabel(labels_tau_f[i])
+        axs4[i, 0].set_ylabel(labels_enu_lin[i])
         axs4[i, 0].grid(True, linestyle=':', alpha=0.7)
-        axs4[i, 1].set_ylabel(labels_tau_t[i])
+        axs4[i, 1].set_ylabel(labels_enu_ang[i])
         axs4[i, 1].grid(True, linestyle=':', alpha=0.7)
 
     axs4[2, 0].set_xlabel('Time [s]')
     axs4[2, 1].set_xlabel('Time [s]')
-    format_figure(fig4, axs4, bottom_margin=0.11)
+    format_figure(fig4, axs4, bottom_margin=0.13)
 
-    fig5 = plt.figure(figsize=(10, 10))
-    ax5 = fig5.add_subplot(111, projection='3d')
-    
-    ax5.plot(eta_ref[:, 0], eta_ref[:, 1], eta_ref[:, 2], 'k--', linewidth=2, label='Reference')
-    
+    # ================= Figure 5: Generalized Torque =================
+    fig5, axs5 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
+    fig5.suptitle(r'Generalized Torque ($\tau$)', fontsize=14, fontweight='bold')
+    labels_tau_f, labels_tau_t = ['X [N]', 'Y [N]', 'Z [N]'], ['K [Nm]', 'M [Nm]', 'N [Nm]']
+
+    for i in range(3):
+        for idx, history in enumerate(histories):
+            tau = history['tau']
+            axs5[i, 0].plot(t, tau[:, i],
+                            color=colors[idx], linestyle=linestyles[idx], linewidth=linewidths[idx],
+                            label=labels[idx] if i == 0 else "")
+            axs5[i, 1].plot(t, tau[:, i+3],
+                            color=colors[idx], linestyle=linestyles[idx], linewidth=linewidths[idx])
+
+        axs5[i, 0].set_ylabel(labels_tau_f[i])
+        axs5[i, 0].grid(True, linestyle=':', alpha=0.7)
+        axs5[i, 1].set_ylabel(labels_tau_t[i])
+        axs5[i, 1].grid(True, linestyle=':', alpha=0.7)
+
+    axs5[2, 0].set_xlabel('Time [s]')
+    axs5[2, 1].set_xlabel('Time [s]')
+    format_figure(fig5, axs5, bottom_margin=0.11)
+
+    # ================= Figure 6: 3D Path =================
+    fig6 = plt.figure(figsize=(10, 10))
+    ax6 = fig6.add_subplot(111, projection='3d')
+
+    ax6.plot(eta_ref[:, 0], eta_ref[:, 1], eta_ref[:, 2], 'k--', linewidth=2, label='Reference')
+
     for idx, history in enumerate(histories):
-        eta = np.array(history['x'])[:, 0:6]
-        ax5.plot(eta[:, 0], eta[:, 1], eta[:, 2], color=colors[idx], label=labels[idx])
-        
-    ax5.set_xlabel('x [m]')
-    ax5.set_ylabel('y [m]')
-    ax5.set_zlabel('z [m]')
-    ax5.set_title('3D Path Tracking Comparison', fontsize=14, fontweight='bold', pad=20)
+        eta = history['x'][:, 0:6]
+        ax6.plot(eta[:, 0], eta[:, 1], eta[:, 2],
+                 color=colors[idx], linestyle=linestyles[idx], linewidth=linewidths[idx],
+                 label=labels[idx])
 
-    handles5, labels5 = ax5.get_legend_handles_labels()
-    fig5.tight_layout(rect=[0, 0.11, 1, 1])
-    fig5.legend(handles5, labels5, loc='upper center', ncol=3, bbox_to_anchor=(0.5, 0.11), columnspacing=2.0, fontsize=10, frameon=True)
+    ax6.set_xlabel('x [m]')
+    ax6.set_ylabel('y [m]')
+    ax6.set_zlabel('z [m]')
+    ax6.set_title('3D Path Tracking Comparison', fontsize=14, fontweight='bold', pad=20)
 
+    handles6, labels6 = ax6.get_legend_handles_labels()
+    fig6.tight_layout(rect=[0, 0.11, 1, 1])
+    fig6.legend(handles6, labels6, loc='upper center', ncol=3, bbox_to_anchor=(0.5, 0.11),
+                columnspacing=2.0, fontsize=10, frameon=True)
+
+    # ================= Metrics & Tables =================
     metrics_eta, metrics_nu = [], []
     for history in histories:
-        eta = np.array(history['x'])[:, 0:6]
+        eta = history['x'][:, 0:6]
         e_lin = eta_ref[:, :3] - eta[:, :3]
         e_ang_rad = (eta_ref[:, 3:6] - eta[:, 3:6] + np.pi) % (2 * np.pi) - np.pi
         e_eta = np.hstack((e_lin, np.rad2deg(e_ang_rad)))
-        metrics_eta.append({'rmse': np.sqrt(np.mean(e_eta**2, axis=0)), 'mae': np.mean(np.abs(e_eta), axis=0), 'maxae': np.max(np.abs(e_eta), axis=0)})
-        
-        nu = np.array(history['x'])[:, 6:12]
-        nu_cmd = np.array(history['nu_cmd_b'])
+        metrics_eta.append({'rmse': np.sqrt(np.mean(e_eta**2, axis=0)),
+                            'mae': np.mean(np.abs(e_eta), axis=0),
+                            'maxae': np.max(np.abs(e_eta), axis=0)})
+
+        nu = history['x'][:, 6:12]
+        nu_cmd = history['nu_cmd_b']
         e_nu = np.hstack((nu_cmd[:, :3] - nu[:, :3], np.rad2deg(nu_cmd[:, 3:6] - nu[:, 3:6])))
-        metrics_nu.append({'rmse': np.sqrt(np.mean(e_nu**2, axis=0)), 'mae': np.mean(np.abs(e_nu), axis=0), 'maxae': np.max(np.abs(e_nu), axis=0)})
+        metrics_nu.append({'rmse': np.sqrt(np.mean(e_nu**2, axis=0)),
+                           'mae': np.mean(np.abs(e_nu), axis=0),
+                           'maxae': np.max(np.abs(e_nu), axis=0)})
 
     def create_metric_figure(title_main, cols, metrics_data):
         fig, axs = plt.subplots(3, 1, figsize=(14, 8))
         fig.suptitle(title_main, fontweight='bold', fontsize=14)
         metric_keys, metric_titles = ['rmse', 'mae', 'maxae'], ['RMSE', 'MAE', 'MaxAE']
-        colors_bg, highlight_color, highlight_text_color = ['#d9ead3', '#cfe2f3', '#f4cccc'], '#fff2cc', '#d62728'
+        colors_bg = ['#d9ead3', '#cfe2f3', '#f4cccc']
+        highlight_color, highlight_text_color = '#fff2cc', '#d62728'
         for i, key in enumerate(metric_keys):
             cell_text = [[f"{m[key][col_idx]:.4f}" for col_idx in range(6)] for m in metrics_data]
-            tbl = axs[i].table(cellText=cell_text, rowLabels=labels, colLabels=cols, loc='center', cellLoc='center', rowColours=['#f2f2f2']*len(labels), colColours=[colors_bg[i]]*6)
+            tbl = axs[i].table(cellText=cell_text, rowLabels=labels, colLabels=cols,
+                               loc='center', cellLoc='center',
+                               rowColours=['#f2f2f2']*len(labels), colColours=[colors_bg[i]]*6)
             for col_idx in range(6):
                 col_vals = [m[key][col_idx] for m in metrics_data]
                 min_idx = np.argmin(col_vals)
@@ -245,18 +385,30 @@ def plot_response(histories, labels, eta_ref_full, save_dir=None):
         fig.tight_layout()
         return fig
 
-    fig6 = create_metric_figure(r'$\eta$ Error Metrics', ['x [m]', 'y [m]', 'z [m]', r'$\phi$ [deg]', r'$\theta$ [deg]', r'$\psi$ [deg]'], metrics_eta)
-    fig7 = create_metric_figure(r'$\nu$ Error Metrics', ['u [m/s]', 'v [m/s]', 'w [m/s]', 'p [deg/s]', 'q [deg/s]', 'r [deg/s]'], metrics_nu)
+    fig7 = create_metric_figure(r'$\eta$ Error Metrics',
+                                ['x [m]', 'y [m]', 'z [m]', r'$\phi$ [deg]', r'$\theta$ [deg]', r'$\psi$ [deg]'],
+                                metrics_eta)
+    fig8 = create_metric_figure(r'$\nu$ Error Metrics',
+                                ['u [m/s]', 'v [m/s]', 'w [m/s]', 'p [deg/s]', 'q [deg/s]', 'r [deg/s]'],
+                                metrics_nu)
 
+    # ================= Save or Show =================
     if save_dir is not None:
         save_path = Path(save_dir)
         save_path.mkdir(parents=True, exist_ok=True)
-        figs = [fig1, fig2, fig3, fig4, fig5, fig6, fig7]
-        names = ["1_kinematics", "2_dynamics", "3_dynamics_error", "4_control_effort", "5_3d_path", "6_table_kinematics_metrics", "7_table_dynamics_metrics"]
+        figs = [fig1, fig2, fig3, fig4, fig5, fig6, fig7, fig8]
+        names = ["1_position_response",
+                 "2_position_error",
+                 "3_velocity_response",
+                 "4_velocity_error",
+                 "5_control_effort",
+                 "6_3d_path",
+                 "7_table_position_metrics",
+                 "8_table_velocity_metrics"]
         for f, name in zip(figs, names):
             f.savefig(save_path / f"{name}.svg", format='svg', bbox_inches='tight')
-        plt.close('all') 
-    else: 
+        plt.close('all')
+    else:
         plt.show()
 
 def get_config_flags(ros_params):
@@ -356,7 +508,7 @@ def run_cascade_simulation(auv_params, pose_ctrl, vel_ctrl, eta_ref_full, config
     N_horizon      = config_flags.get('N_horizon', 10)
     use_ff         = config_flags.get('use_ff', False)
     use_filter     = config_flags.get('use_filter', False)
-    alpha_ff       = config_flags.get('alpha_ff', 0.8)
+    alpha_ff       = config_flags.get('alpha_ff', 0.2)
     use_preview    = config_flags.get('use_preview', False)
     pose_ctrl_type = config_flags.get('pose_ctrl_type', 'pid')
     vel_ctrl_type  = config_flags.get('vel_ctrl_type', 'mpc')
@@ -508,126 +660,83 @@ def main():
     # Load AUV Dynamics Setup
     auv_params = load_params('/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_descriptions/robots/xplorer_mini_dynamic_parameters.yaml')
 
-    # Unconstrained case
+    # Journal (option 1)
     # study_cases = {
-    #     "Case_1_Model_Fidelity": [
-    #         {"label": "pid - pid",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-    #         {"label": "ffpi - standard DMDc-Unconstrained-MPC without preview",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/unconstrained/without_preview/ffpi_stdmpc_gain.yaml"},
-    #         {"label": "ffpi - standard eDMDc-Unconstrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/unconstrained/without_preview/ffpi_stdmpc_gain.yaml"},
+    #     "Case_1_Model_Accuracy_without_Preview": [
+    #         {"label": "PID -- PID",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dpid_gain.yaml"},
+    #         {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (DMDc)",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Offset-Free Koopman-Based MPC without preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Offset-Free Koopman-Based MPC without preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"}
+
     #     ],
-    #     "Case_2_Preview_Impact": [
-    #         {"label": "pid - pid",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-    #         {"label": "ffpi - standard eDMDc-Unconstrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/unconstrained/without_preview/ffpi_stdmpc_gain.yaml"},
-    #         {"label": "ffpi - standard eDMDc-Unconstrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/unconstrained/with_preview/ffpi_stdmpc_gain.yaml"}
+    #     "Case_2_Preview_Impact_Nominal_MPC": [
+    #         {"label": "PID -- PID",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dpid_gain.yaml"},
+    #         {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"}
     #     ],
-    #     "Case_3_Integral_Robustness": [
-    #         {"label": "pid - pid",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-    #         {"label": "ffpi - standard eDMDc-Unconstrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/unconstrained/with_preview/ffpi_stdmpc_gain.yaml"},
-    #         {"label": "ffpi - augmented integral error eDMDc-Unconstrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/unconstrained/with_preview/ffpi_intmpc_gain.yaml"}
+    #     "Case_3_Preview_Impact_Offset-Free_MPC": [
+    #         {"label": "PID -- PID",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dpid_gain.yaml"},
+    #         {"label": "PIwFF -- Offset-Free Koopman-Based MPC without preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Offset-Free Koopman-Based MPC with preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Offset-Free Koopman-Based MPC without preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Offset-Free Koopman-Based MPC with preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"}
     #     ],
-    #     "Case_4_With_Preview": [
-    #         {"label": "pid - pid",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-    #         {"label": "ffpi - standard DMDc-Unconstrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/unconstrained/with_preview/ffpi_stdmpc_gain.yaml"},
-    #         {"label": "ffpi - standard eDMDc-Unconstrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/unconstrained/with_preview/ffpi_stdmpc_gain.yaml"},
-    #         {"label": "ffpi - augmented integral error DMDc-Unconstrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/unconstrained/with_preview/ffpi_intmpc_gain.yaml"},
-    #         {"label": "ffpi - augmented integral error eDMDc-Unconstrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/unconstrained/with_preview/ffpi_intmpc_gain.yaml"}
-    #     ],
-    #     "Case_5_Without_Preview": [
-    #         {"label": "pid - pid",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-    #         {"label": "ffpi - standard DMDc-Unconstrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/unconstrained/without_preview/ffpi_stdmpc_gain.yaml"},
-    #         {"label": "ffpi - standard eDMDc-Unconstrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/unconstrained/without_preview/ffpi_stdmpc_gain.yaml"},
-    #         {"label": "ffpi - augmented integral error DMDc-Unconstrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/unconstrained/without_preview/ffpi_intmpc_gain.yaml"},
-    #         {"label": "ffpi - augmented integral error eDMDc-Unconstrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/unconstrained/without_preview/ffpi_intmpc_gain.yaml"}
-    #     ],
-    #     "Case_6_cons_vs_uncons": [
-    #         {"label": "pid - pid",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-    #         {"label": "ffpi - standard DMDc-Unconstrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/unconstrained/with_preview/ffpi_stdmpc_gain.yaml"},
-    #         {"label": "ffpi - standard DMDc-Constrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
-    #         {"label": "ffpi - augmented integral error DMDc-Unconstrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/unconstrained/with_preview/ffpi_intmpc_gain.yaml"},
-    #         {"label": "ffpi - augmented integral error DMDc-Constrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"}
-    #     ],
+    #     "Case_4_Offset-Free_MPC": [
+    #         {"label": "PID -- PID",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dpid_gain.yaml"},
+    #         {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (DMDc) ", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Offset-Free Koopman-Based MPC with preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (eDMDc) ", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
+    #         {"label": "PIwFF -- Offset-Free Koopman-Based MPC with preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"}
+    #     ]
     # }
 
-    # # Constrained case
-    # study_cases = {
-    #         "Case_1_Overall_cons": [
-    #             {"label": "pid - pid",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-    #             {"label": "ffpi - standard DMDc-Constrained-MPC without preview",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
-    #             {"label": "ffpi - standard eDMDc-Constrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
-    #             {"label": "ffpi - standard DMDc-Constrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
-    #             {"label": "ffpi - standard eDMDc-Constrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
-    #             {"label": "ffpi - augmented integral error DMDc-Constrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"},
-    #             {"label": "ffpi - augmented integral error eDMDc-Constrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"},
-    #             {"label": "ffpi - augmented integral error DMDc-Constrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"},
-    #             {"label": "ffpi - augmented integral error eDMDc-Constrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"}
-    #         ],
-    #         "Case_2_Overall_standard": [
-    #             {"label": "pid - pid",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-    #             {"label": "ffpi - standard DMDc-Constrained-MPC without preview",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
-    #             {"label": "ffpi - standard eDMDc-Constrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
-    #             {"label": "ffpi - standard DMDc-Constrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
-    #             {"label": "ffpi - standard eDMDc-Constrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"}
-    #         ],
-    #         "Case_3_Overall_augmented": [
-    #             {"label": "pid - pid",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-    #             {"label": "ffpi - augmented integral error DMDc-Constrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"},
-    #             {"label": "ffpi - augmented integral error eDMDc-Constrained-MPC without preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"},
-    #             {"label": "ffpi - augmented integral error DMDc-Constrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"},
-    #             {"label": "ffpi - augmented integral error eDMDc-Constrained-MPC with preview", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"}
-    #         ],
-    # }
-
-    # Journal
+    # Journal (option 2)
     study_cases = {
-        "Case_1_Model_Fidelity_without_Preview": [
-            {"label": "PI -- PI",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-            {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (DMDc)",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
-            {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
-            {"label": "PIwFF -- Offset-Free Koopman-Based MPC without preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"},
-            {"label": "PIwFF -- Offset-Free Koopman-Based MPC without preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"}
+        "Case_1_Model_Accuracy_without_Preview": [
+            {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (DMDc)",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
+            {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
+            {"label": "PIwFF -- Offset-Free Koopman-Based MPC without preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"},
+            {"label": "PIwFF -- Offset-Free Koopman-Based MPC without preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"}
 
         ],
         "Case_2_Preview_Impact_Nominal_MPC": [
-            {"label": "PI -- PI",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-            {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
-            {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
-            {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
-            {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"}
+            {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
+            {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
+            {"label": "PIwFF -- Nominal Koopman-Based MPC without preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/without_preview/ffpi_stdmpc_gain.yaml"},
+            {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"}
         ],
-        "Case_3_Preview_Impact_Offset-Free_MPC": [
-            {"label": "PI -- PI",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-            {"label": "PIwFF -- Offset-Free Koopman-Based MPC without preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"},
-            {"label": "PIwFF -- Offset-Free Koopman-Based MPC with preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"},
-            {"label": "PIwFF -- Offset-Free Koopman-Based MPC without preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/without_preview/ffpi_intmpc_gain.yaml"},
-            {"label": "PIwFF -- Offset-Free Koopman-Based MPC with preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"}
-        ],
-        "Case_4_Offset-Free_MPC": [
-            {"label": "PI -- PI",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dpid_gain.yaml"},
-            {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (DMDc) ", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
-            {"label": "PIwFF -- Offset-Free Koopman-Based MPC with preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/dmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"},
-            {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (eDMDc) ", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
-            {"label": "PIwFF -- Offset-Free Koopman-Based MPC with preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/config/controller/edmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"}
+        "Case_3_Offset-Free_MPC": [
+            {"label": "PID -- PID",  "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dpid_gain.yaml"},
+            {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (DMDc) ", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
+            {"label": "PIwFF -- Offset-Free Koopman-Based MPC with preview (DMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/dmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"},
+            {"label": "PIwFF -- Nominal Koopman-Based MPC with preview (eDMDc) ", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/with_preview/ffpi_stdmpc_gain.yaml"},
+            {"label": "PIwFF -- Offset-Free Koopman-Based MPC with preview (eDMDc)", "path": "/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/gain/edmdc/constrained/with_preview/ffpi_intmpc_gain.yaml"}
         ]
     }
 
     # Define Base Output Directory
-    base_result_dir = Path("/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/results")
+    base_result_dir = Path("/home/tanbjs/xplorer_mini_sim_ws/src/xplorer_mini_sysid/notebook/results/control")
     base_result_dir.mkdir(parents=True, exist_ok=True)
     mlflow_client = mlflow.MlflowClient()
 
     # Generate Trajectory
     dt = 0.1
-    t_end = 60
-    eta_ref_full, _ = figure8_path(N=1, start_point=np.array([0,0,0.5,0,0,0]), end_point=np.array([0,0,0.5,0,0,0]), tfinal=t_end, dt=dt)
+    t_end = 60.0
 
-    # t_end = 360
+    # eta_ref_full, _ = figure8_path(N=1, start_point=np.array([0,0,0.5,0,0,0]), end_point=np.array([0,0,0.5,0,0,0]), tfinal=t_end, dt=dt)
+    eta_ref_full, _ = zigzag_path(num_zigs=2, start_point=np.array([0,0,0.2,0,0,0]), end_point=np.array([10,10,2.0,0,0,0]), dt=dt, tfinal=t_end)
     # eta_ref_full, _ = circle_path(N=2, init_pose=np.array([0,0,0.5,0,0,0]),desired_pose=np.array([10,10,5.0,0,0,0]), dt=dt, end_t=t_end)
 
     DEBUG_MODE = False
-    hold_time = 30.0
+    hold_time = 40.0
     hold_steps = int(hold_time / dt)
     hold_trajectory = np.tile(eta_ref_full[-1, :], (hold_steps, 1)) 
     eta_ref_full = np.vstack((eta_ref_full, hold_trajectory))
+    
+    t_sim = t_end + hold_time
 
     # Batch Simulation Loop
     for idx_i, (study_name, configs) in enumerate(study_cases.items()):
@@ -665,7 +774,7 @@ def main():
             pose_ctrl, vel_ctrl = init_controllers(koopman_model, ros_params, node_name, sim_logger)
 
             print(f"Running Simulation: {label} ")
-            history = run_cascade_simulation(auv_params, pose_ctrl, vel_ctrl, eta_ref_full, flags, t_end, dt, DEBUG_MODE)
+            history = run_cascade_simulation(auv_params, pose_ctrl, vel_ctrl, eta_ref_full, flags, t_sim, dt, DEBUG_MODE)
             histories.append(history)
 
         # Plot and Save Results
@@ -675,3 +784,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+    
